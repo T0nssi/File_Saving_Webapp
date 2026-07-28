@@ -1,0 +1,116 @@
+"use client";
+
+import Link from "next/link";
+import { FileText, Trash2, Pencil, Eye, FolderInput } from "lucide-react";
+import { formatBytes } from "@/lib/format";
+import type { FileDoc, FolderDoc } from "@/types";
+
+interface Props {
+  file: FileDoc;
+  folders: FolderDoc[];
+  onDelete: (id: string) => void;
+  onPreview: (file: FileDoc) => void;
+  onMove: (id: string, folderId: string | null) => void;
+}
+
+export default function FileCard({ file, folders, onDelete, onPreview, onMove }: Props) {
+  const isImage = file.mimeType.startsWith("image/");
+
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/plain", file._id);
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      className="group flex cursor-grab flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] active:cursor-grabbing"
+    >
+      <button
+        type="button"
+        onClick={() => onPreview(file)}
+        className="flex h-36 w-full items-center justify-center bg-zinc-50"
+      >
+        {isImage ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={`/api/files/${file._id}/download`}
+            alt={file.filename}
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <FileText size={32} className="text-[var(--color-muted)]" />
+        )}
+      </button>
+
+      <div className="flex flex-1 flex-col gap-2 p-3">
+        <p className="truncate text-sm font-medium" title={file.filename}>
+          {file.filename}
+        </p>
+        {file.description && (
+          <p className="line-clamp-2 text-xs text-[var(--color-muted)]">{file.description}</p>
+        )}
+        {file.tags.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {file.tags.slice(0, 4).map((t) => (
+              <span key={t} className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
+                {t}
+              </span>
+            ))}
+          </div>
+        )}
+        {file.uploadedBy && (
+          <p className="text-[10px] text-[var(--color-muted)]">อัพโหลดโดย {file.uploadedBy}</p>
+        )}
+
+        <div className="flex items-center gap-1.5">
+          <FolderInput size={12} className="shrink-0 text-[var(--color-muted)]" />
+          <select
+            aria-label={`Move ${file.filename} to folder`}
+            value={file.folderId ?? "root"}
+            onChange={(e) => onMove(file._id, e.target.value === "root" ? null : e.target.value)}
+            className="w-full truncate rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-[11px] outline-none focus-visible:border-[var(--color-accent)]"
+          >
+            <option value="root">ยังไม่จัดหมวด</option>
+            {folders.map((f) => (
+              <option key={f._id} value={f._id}>
+                {f.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="mt-auto flex items-center justify-between pt-2">
+          <span className="text-[10px] text-[var(--color-muted)]">
+            {formatBytes(file.size)} · {new Date(file.uploadedAt).toLocaleDateString()}
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              aria-label={`Preview ${file.filename}`}
+              onClick={() => onPreview(file)}
+              className="rounded p-1.5 text-[var(--color-muted)] hover:bg-zinc-100 hover:text-[var(--color-accent)]"
+            >
+              <Eye size={14} />
+            </button>
+            <Link
+              href={`/edit/${file._id}`}
+              aria-label={`Edit ${file.filename}`}
+              className="rounded p-1.5 text-[var(--color-muted)] hover:bg-zinc-100 hover:text-[var(--color-accent)]"
+            >
+              <Pencil size={14} />
+            </Link>
+            <button
+              type="button"
+              aria-label={`Delete ${file.filename}`}
+              onClick={() => onDelete(file._id)}
+              className="rounded p-1.5 text-[var(--color-muted)] hover:bg-red-50 hover:text-[var(--color-danger)]"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
