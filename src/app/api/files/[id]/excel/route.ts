@@ -184,10 +184,61 @@ export async function POST(req: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "Not an Excel file" }, { status: 400 });
     }
 
+    // Read original file BEFORE deleting to preserve formatting and styling
+    const bucket = await getBucket();
+    let originalWorkbook: XLSX.WorkBook | null = null;
+
+    try {
+      const downloadStream = bucket.openDownloadStream(file.gridFsId);
+      const chunks: Buffer[] = [];
+      for await (const chunk of downloadStream) {
+        chunks.push(chunk);
+      }
+      const originalBuffer = Buffer.concat(chunks);
+      originalWorkbook = XLSX.read(originalBuffer, { type: "buffer" });
+    } catch (err) {
+      console.warn("Could not read original file for styling preservation");
+    }
+
+    // Update sheets with new data while preserving original formatting
     const workbook = XLSX.utils.book_new();
     sheets.forEach((sheet: { name: string; data: string[][] }) => {
-      const worksheet = XLSX.utils.aoa_to_sheet(sheet.data);
-      XLSX.utils.book_append_sheet(workbook, worksheet, sheet.name);
+      // Find original sheet to copy formatting
+      const originalSheet = originalWorkbook?.Sheets[sheet.name];
+
+      if (originalSheet) {
+        // Create new worksheet with data and copy formatting from original
+        const newWorksheet = XLSX.utils.aoa_to_sheet(sheet.data);
+
+        // Copy styles, merges, and other formatting from original
+        Object.keys(originalSheet).forEach((key) => {
+          // Skip data cells (they start with letters like A1, B2, etc)
+          if (!/^[A-Z]+\d+$/.test(key)) {
+            // Copy meta information and formatting
+            newWorksheet[key] = originalSheet[key];
+          }
+        });
+
+        // Copy over style information for existing cells
+        Object.keys(originalSheet).forEach((cellKey) => {
+          const match = cellKey.match(/^([A-Z]+)(\d+)$/);
+          if (match) {
+            // If cell exists in original and has style, apply to new worksheet
+            const originalCell = originalSheet[cellKey];
+            const cellInNewSheet = newWorksheet[cellKey];
+
+            if (originalCell && cellInNewSheet && originalCell.s) {
+              cellInNewSheet.s = originalCell.s;
+            }
+          }
+        });
+
+        XLSX.utils.book_append_sheet(workbook, newWorksheet, sheet.name);
+      } else {
+        // Sheet doesn't exist in original, create new one
+        const worksheet = XLSX.utils.aoa_to_sheet(sheet.data);
+        XLSX.utils.book_append_sheet(workbook, worksheet, sheet.name);
+      }
     });
 
     const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
@@ -199,8 +250,6 @@ export async function POST(req: NextRequest, { params }: Params) {
         { status: 400 }
       );
     }
-
-    const bucket = await getBucket();
 
     // Delete old file
     try {
