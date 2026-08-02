@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 import { dbConnect } from "@/lib/mongodb";
 import FileModel from "@/models/File";
+import RevisionModel from "@/models/Revision";
 import { requireUser } from "@/lib/session";
 import { getBucket } from "@/lib/gridfs";
 import { Readable } from "stream";
@@ -63,13 +64,40 @@ export async function GET(_req: NextRequest, { params }: Params) {
       if (!worksheet) {
         return { name: sheetName, data: [Array(10).fill("")] };
       }
-      const data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
+      let data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
+
+      // Trim trailing empty rows
+      while (data.length > 0 && data[data.length - 1]?.every(cell => !cell)) {
+        data.pop();
+      }
+
+      // If no data, show empty grid
+      if (data.length === 0) {
+        return { name: sheetName, data: [Array(10).fill("")] };
+      }
+
+      // Trim trailing empty columns
+      let maxCols = Math.max(...data.map(row => row.length));
+      let actualMaxCols = 0;
+      for (let col = 0; col < maxCols; col++) {
+        const hasValue = data.some(row => row[col]);
+        if (hasValue) actualMaxCols = col + 1;
+      }
+
+      // Normalize rows to have consistent column count
+      data = data.map(row => {
+        const normalized = [...row];
+        while (normalized.length < actualMaxCols) {
+          normalized.push("");
+        }
+        return normalized.slice(0, actualMaxCols);
+      });
 
       // Security: Check sheet dimensions
       if (data.length > MAX_ROWS) {
         throw new Error(`Sheet "${sheetName}" exceeds maximum rows (${MAX_ROWS})`);
       }
-      if (data[0] && data[0].length > MAX_COLS) {
+      if (actualMaxCols > MAX_COLS) {
         throw new Error(`Sheet "${sheetName}" exceeds maximum columns (${MAX_COLS})`);
       }
 
@@ -191,6 +219,23 @@ export async function POST(req: NextRequest, { params }: Params) {
       uploadStream.on("finish", () => resolve());
     });
 
+    // Store old file as revision before updating
+    const previousRevisions = await RevisionModel.find({ fileId: id }).sort({ versionNumber: -1 }).limit(1);
+    const nextVersion = (previousRevisions[0]?.versionNumber ?? 0) + 1;
+
+    // Create revision of old file (before update)
+    if (file.gridFsId) {
+      const revision = new RevisionModel({
+        fileId: id,
+        versionNumber: nextVersion,
+        gridFsId: uploadStream.id,
+        changedBy: requester.username,
+        changesSummary: `Edited by ${requester.username}`,
+        size: buffer.length,
+      });
+      await revision.save();
+    }
+
     // Update file record
     file.size = buffer.length;
     file.gridFsId = uploadStream.id;
@@ -199,6 +244,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     return NextResponse.json({
       success: true,
       file: file.toObject(),
+      version: nextVersion,
     });
   } catch (error) {
     console.error("Excel save error:", error);

@@ -266,16 +266,21 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                 <th
                   key={colIdx}
                   style={{
-                    width: columnWidths[colIdx] ? `${columnWidths[colIdx]}px` : undefined,
+                    width: columnWidths[colIdx] ? `${columnWidths[colIdx]}px` : "auto",
+                    minWidth: "80px",
                   }}
-                  className="relative min-w-[80px] border-r border-[var(--color-border)] bg-zinc-100 px-3 py-2 text-center text-xs font-semibold text-[var(--color-muted)]"
+                  className="relative border-r border-[var(--color-border)] bg-zinc-100 px-3 py-2 text-center text-xs font-semibold text-[var(--color-muted)] select-none"
                 >
                   {getColumnHeader(colIdx)}
                   {/* Resize handle */}
                   <div
                     onMouseDown={(e) => handleMouseDown(e, colIdx)}
-                    className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-[var(--color-accent)]"
+                    className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-[var(--color-accent)] hover:w-2 transition-all"
                     title="Drag to resize column"
+                    style={{
+                      backgroundColor: "transparent",
+                      transition: "background-color 200ms, width 200ms",
+                    }}
                   />
                 </th>
               ))}
@@ -291,16 +296,17 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                   <td
                     key={`${rowIdx}-${colIdx}`}
                     style={{
-                      width: columnWidths[colIdx] ? `${columnWidths[colIdx]}px` : undefined,
+                      width: columnWidths[colIdx] ? `${columnWidths[colIdx]}px` : "auto",
+                      minWidth: "80px",
                     }}
-                    className="border-r border-[var(--color-border)] px-3 py-2"
+                    className="border-r border-[var(--color-border)] px-3 py-2 overflow-hidden"
                   >
                     <input
                       type="text"
                       value={cell ?? ""}
                       onChange={(e) => handleCellChange(rowIdx, colIdx, e.target.value)}
                       placeholder={(cell === "" || cell === null) ? "empty" : undefined}
-                      className="w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 focus:border-[var(--color-accent)] focus:bg-white"
+                      className="w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 focus:border-[var(--color-accent)] focus:bg-white focus:ring-1 focus:ring-offset-0"
                     />
                   </td>
                 ))}
