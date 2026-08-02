@@ -23,7 +23,6 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   const [showMenu, setShowMenu] = useState(false);
   const [editingSheetName, setEditingSheetName] = useState<number | null>(null);
   const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
-  const [resizingCol, setResizingCol] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const currentSheet = sheets[activeSheet] ?? { name: "", data: [] };
@@ -122,32 +121,27 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   };
 
   const handleMouseDown = (e: React.MouseEvent, colIdx: number) => {
-    setResizingCol(colIdx);
-    e.preventDefault();
-  };
+    const startX = e.clientX;
+    const startWidth = columnWidths[colIdx] || 100;
 
-  useEffect(() => {
-    if (resizingCol === null) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const newWidth = Math.max(50, e.clientX);
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - startX;
+      const newWidth = Math.max(50, startWidth + delta);
       setColumnWidths(prev => ({
         ...prev,
-        [resizingCol]: newWidth,
+        [colIdx]: newWidth,
       }));
     };
 
     const handleMouseUp = () => {
-      setResizingCol(null);
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
     };
 
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [resizingCol]);
+    e.preventDefault();
+  };
 
   const getColumnHeader = (index: number): string => {
     let header = "";
@@ -303,9 +297,9 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                   >
                     <input
                       type="text"
-                      value={cell}
+                      value={cell ?? ""}
                       onChange={(e) => handleCellChange(rowIdx, colIdx, e.target.value)}
-                      placeholder={cell === "" ? "empty" : undefined}
+                      placeholder={(cell === "" || cell === null) ? "empty" : undefined}
                       className="w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 focus:border-[var(--color-accent)] focus:bg-white"
                     />
                   </td>

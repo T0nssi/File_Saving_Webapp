@@ -10,6 +10,11 @@ interface Params {
   params: Promise<{ id: string }>;
 }
 
+interface Sheet {
+  name: string;
+  data: string[][];
+}
+
 // Security constants
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_ROWS = 10000;
@@ -91,49 +96,52 @@ export async function POST(req: NextRequest, { params }: Params) {
     if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { id } = await params;
-    const { sheets } = await req.json();
+    const { sheets: inputSheets } = await req.json();
 
     // Security: Validate sheets input
-    if (!Array.isArray(sheets) || sheets.length === 0) {
+    if (!Array.isArray(inputSheets) || inputSheets.length === 0) {
       return NextResponse.json({ error: "Invalid sheets data" }, { status: 400 });
     }
 
-    if (sheets.length > MAX_SHEETS) {
+    if (inputSheets.length > MAX_SHEETS) {
       return NextResponse.json(
         { error: `Too many sheets (max ${MAX_SHEETS})` },
         { status: 400 }
       );
     }
 
-    // Validate each sheet
-    for (const sheet of sheets) {
-      if (!sheet.name || !Array.isArray(sheet.data)) {
-        return NextResponse.json({ error: "Invalid sheet format" }, { status: 400 });
-      }
-      if (sheet.data.length > MAX_ROWS) {
-        return NextResponse.json(
-          { error: `Sheet exceeds maximum rows (${MAX_ROWS})` },
-          { status: 400 }
-        );
-      }
-      if (sheet.data[0] && sheet.data[0].length > MAX_COLS) {
-        return NextResponse.json(
-          { error: `Sheet exceeds maximum columns (${MAX_COLS})` },
-          { status: 400 }
-        );
-      }
-      // Validate that all values are strings or empty strings
-      for (const row of sheet.data) {
-        for (const cell of row) {
-          if (typeof cell !== "string") {
-            return NextResponse.json(
-              { error: "All cell values must be strings" },
-              { status: 400 }
-            );
-          }
-          // Empty strings are allowed
+    // Validate and normalize each sheet
+    let sheets: Sheet[];
+    try {
+      sheets = inputSheets.map((sheet: { name: string; data: any[][] }) => {
+        if (!sheet.name || !Array.isArray(sheet.data)) {
+          throw new Error("Invalid sheet format");
         }
-      }
+        if (sheet.data.length > MAX_ROWS) {
+          throw new Error(`Sheet exceeds maximum rows (${MAX_ROWS})`);
+        }
+
+        // Normalize data: convert all values to strings, null/undefined to empty strings
+        const normalizedData = sheet.data.map((row) =>
+          row.map((cell) => {
+            if (cell === null || cell === undefined) return "";
+            return String(cell);
+          })
+        );
+
+        // Check columns
+        if (normalizedData[0] && normalizedData[0].length > MAX_COLS) {
+          throw new Error(`Sheet exceeds maximum columns (${MAX_COLS})`);
+        }
+
+        return {
+          name: sheet.name,
+          data: normalizedData,
+        };
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Validation failed";
+      return NextResponse.json({ error: message }, { status: 400 });
     }
 
     await dbConnect();
