@@ -53,3 +53,14 @@ export interface Paginated<T> {
   page: number;
   pages: number;
 }
+
+export interface RevisionDoc {
+  _id: string;
+  fileId: string;
+  versionNumber: number;
+  gridFsId: string;
+  changedBy: string;
+  changesSummary: string;
+  size: number;
+  createdAt: string;
+}

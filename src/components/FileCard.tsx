@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FileText, Trash2, Pencil, Eye, FolderInput } from "lucide-react";
+import { FileText, Trash2, Pencil, Eye, FolderInput, Sheet } from "lucide-react";
 import { formatBytes } from "@/lib/format";
 import type { FileDoc, FolderDoc } from "@/types";
 
@@ -15,6 +15,7 @@ interface Props {
 
 export default function FileCard({ file, folders, onDelete, onPreview, onMove }: Props) {
   const isImage = file.mimeType.startsWith("image/");
+  const isExcel = file.mimeType.includes("spreadsheet") || file.mimeType.includes("excel") || file.filename.endsWith(".xlsx") || file.filename.endsWith(".xls");
 
   return (
     <div
@@ -38,6 +39,8 @@ export default function FileCard({ file, folders, onDelete, onPreview, onMove }:
             className="h-full w-full object-cover"
             loading="lazy"
           />
+        ) : isExcel ? (
+          <Sheet size={32} className="text-green-600" />
         ) : (
           <FileText size={32} className="text-[var(--color-muted)]" />
         )}
@@ -93,13 +96,23 @@ export default function FileCard({ file, folders, onDelete, onPreview, onMove }:
             >
               <Eye size={14} />
             </button>
-            <Link
-              href={`/edit/${file._id}`}
-              aria-label={`Edit ${file.filename}`}
-              className="rounded p-1.5 text-[var(--color-muted)] hover:bg-zinc-100 hover:text-[var(--color-accent)]"
-            >
-              <Pencil size={14} />
-            </Link>
+            {isExcel ? (
+              <Link
+                href={`/excel/${file._id}`}
+                aria-label={`Edit Excel ${file.filename}`}
+                className="rounded p-1.5 text-[var(--color-muted)] hover:bg-zinc-100 hover:text-green-600"
+              >
+                <Sheet size={14} />
+              </Link>
+            ) : (
+              <Link
+                href={`/edit/${file._id}`}
+                aria-label={`Edit ${file.filename}`}
+                className="rounded p-1.5 text-[var(--color-muted)] hover:bg-zinc-100 hover:text-[var(--color-accent)]"
+              >
+                <Pencil size={14} />
+              </Link>
+            )}
             <button
               type="button"
               aria-label={`Delete ${file.filename}`}
