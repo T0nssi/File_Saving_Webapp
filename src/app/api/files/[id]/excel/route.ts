@@ -122,7 +122,7 @@ export async function POST(req: NextRequest, { params }: Params) {
           { status: 400 }
         );
       }
-      // Validate that all values are strings
+      // Validate that all values are strings or empty strings
       for (const row of sheet.data) {
         for (const cell of row) {
           if (typeof cell !== "string") {
@@ -131,6 +131,7 @@ export async function POST(req: NextRequest, { params }: Params) {
               { status: 400 }
             );
           }
+          // Empty strings are allowed
         }
       }
     }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Save, RotateCcw, MoreVertical, ChevronDown, Eye, Download } from "lucide-react";
+import { Save, RotateCcw, MoreVertical, ChevronDown, Eye, Download, Copy, Edit2 } from "lucide-react";
 
 interface Sheet {
   name: string;
@@ -21,6 +21,9 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   const [activeSheet, setActiveSheet] = useState(0);
   const [history, setHistory] = useState<Sheet[][]>([initialSheets]);
   const [showMenu, setShowMenu] = useState(false);
+  const [editingSheetName, setEditingSheetName] = useState<number | null>(null);
+  const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
+  const [resizingCol, setResizingCol] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const currentSheet = sheets[activeSheet] ?? { name: "", data: [] };
@@ -93,6 +96,59 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     await onSave(sheets);
   };
 
+  const renameSheet = (sheetIndex: number, newName: string) => {
+    if (newName.trim()) {
+      const newSheets = sheets.map((s, idx) =>
+        idx === sheetIndex ? { ...s, name: newName.trim() } : s
+      );
+      setSheets(newSheets);
+      setHistory([...history, newSheets]);
+    }
+    setEditingSheetName(null);
+  };
+
+  const cloneSheet = () => {
+    const sheet = sheets[activeSheet];
+    if (sheet) {
+      const newName = `${sheet.name} (copy)`;
+      const newSheet = {
+        name: newName,
+        data: sheet.data.map(row => [...row]),
+      };
+      const newSheets = [...sheets, newSheet];
+      setSheets(newSheets);
+      setHistory([...history, newSheets]);
+    }
+  };
+
+  const handleMouseDown = (e: React.MouseEvent, colIdx: number) => {
+    setResizingCol(colIdx);
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    if (resizingCol === null) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = Math.max(50, e.clientX);
+      setColumnWidths(prev => ({
+        ...prev,
+        [resizingCol]: newWidth,
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setResizingCol(null);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [resizingCol]);
+
   const getColumnHeader = (index: number): string => {
     let header = "";
     let num = index;
@@ -108,17 +164,38 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
       <div className="flex items-center justify-between">
         <div className="flex gap-2">
           {sheets.map((sheet, idx) => (
-            <button
+            <div
               key={idx}
-              onClick={() => setActiveSheet(idx)}
-              className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+              className={`rounded-md transition-colors ${
                 activeSheet === idx
                   ? "bg-[var(--color-accent)] text-white"
                   : "bg-zinc-100 hover:bg-zinc-200"
               }`}
             >
-              {sheet.name}
-            </button>
+              {editingSheetName === idx ? (
+                <input
+                  autoFocus
+                  type="text"
+                  defaultValue={sheet.name}
+                  onBlur={(e) => renameSheet(idx, e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") renameSheet(idx, e.currentTarget.value);
+                    if (e.key === "Escape") setEditingSheetName(null);
+                  }}
+                  className="w-32 rounded-md border-0 px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-offset-1"
+                />
+              ) : (
+                <button
+                  onClick={() => setActiveSheet(idx)}
+                  onDoubleClick={() => setEditingSheetName(idx)}
+                  className="flex items-center gap-1 px-3 py-2 text-sm font-medium"
+                  title="Double-click to rename"
+                >
+                  {sheet.name}
+                  {activeSheet === idx && <Edit2 size={12} className="opacity-50" />}
+                </button>
+              )}
+            </div>
           ))}
         </div>
 
@@ -160,6 +237,16 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                 >
                   Add column
                 </button>
+                <div className="border-t border-[var(--color-border)]" />
+                <button
+                  onClick={() => {
+                    cloneSheet();
+                    setShowMenu(false);
+                  }}
+                  className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                >
+                  <Copy size={14} /> Clone sheet
+                </button>
               </div>
             )}
           </div>
@@ -184,9 +271,18 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
               {currentSheet.data[0]?.map((_, colIdx) => (
                 <th
                   key={colIdx}
-                  className="min-w-[100px] border-r border-[var(--color-border)] bg-zinc-100 px-3 py-2 text-center text-xs font-semibold text-[var(--color-muted)]"
+                  style={{
+                    width: columnWidths[colIdx] ? `${columnWidths[colIdx]}px` : undefined,
+                  }}
+                  className="relative min-w-[80px] border-r border-[var(--color-border)] bg-zinc-100 px-3 py-2 text-center text-xs font-semibold text-[var(--color-muted)]"
                 >
                   {getColumnHeader(colIdx)}
+                  {/* Resize handle */}
+                  <div
+                    onMouseDown={(e) => handleMouseDown(e, colIdx)}
+                    className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-[var(--color-accent)]"
+                    title="Drag to resize column"
+                  />
                 </th>
               ))}
             </tr>
@@ -200,13 +296,17 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                 {row.map((cell, colIdx) => (
                   <td
                     key={`${rowIdx}-${colIdx}`}
+                    style={{
+                      width: columnWidths[colIdx] ? `${columnWidths[colIdx]}px` : undefined,
+                    }}
                     className="border-r border-[var(--color-border)] px-3 py-2"
                   >
                     <input
                       type="text"
                       value={cell}
                       onChange={(e) => handleCellChange(rowIdx, colIdx, e.target.value)}
-                      className="w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none focus:border-[var(--color-accent)] focus:bg-white"
+                      placeholder={cell === "" ? "empty" : undefined}
+                      className="w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 focus:border-[var(--color-accent)] focus:bg-white"
                     />
                   </td>
                 ))}
