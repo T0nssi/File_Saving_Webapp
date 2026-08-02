@@ -10,6 +10,12 @@ interface Params {
   params: Promise<{ id: string }>;
 }
 
+// Security constants
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_ROWS = 10000;
+const MAX_COLS = 500;
+const MAX_SHEETS = 50;
+
 export async function GET(_req: NextRequest, { params }: Params) {
   try {
     const { id } = await params;
@@ -18,6 +24,14 @@ export async function GET(_req: NextRequest, { params }: Params) {
     const file = await FileModel.findById(id);
     if (!file || (!file.mimeType.includes("spreadsheet") && !file.mimeType.includes("excel"))) {
       return NextResponse.json({ error: "File not found or not an Excel file" }, { status: 404 });
+    }
+
+    // Security: Check file size
+    if (file.size > MAX_FILE_SIZE) {
+      return NextResponse.json(
+        { error: `File exceeds maximum size of ${MAX_FILE_SIZE / 1024 / 1024}MB` },
+        { status: 400 }
+      );
     }
 
     const bucket = await getBucket();
@@ -31,12 +45,29 @@ export async function GET(_req: NextRequest, { params }: Params) {
     const buffer = Buffer.concat(chunks);
     const workbook = XLSX.read(buffer, { type: "buffer" });
 
+    // Security: Check number of sheets
+    if (workbook.SheetNames.length > MAX_SHEETS) {
+      return NextResponse.json(
+        { error: `File contains too many sheets (max ${MAX_SHEETS})` },
+        { status: 400 }
+      );
+    }
+
     const sheets = workbook.SheetNames.map((sheetName) => {
       const worksheet = workbook.Sheets[sheetName];
       if (!worksheet) {
         return { name: sheetName, data: [Array(10).fill("")] };
       }
       const data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
+
+      // Security: Check sheet dimensions
+      if (data.length > MAX_ROWS) {
+        throw new Error(`Sheet "${sheetName}" exceeds maximum rows (${MAX_ROWS})`);
+      }
+      if (data[0] && data[0].length > MAX_COLS) {
+        throw new Error(`Sheet "${sheetName}" exceeds maximum columns (${MAX_COLS})`);
+      }
+
       return {
         name: sheetName,
         data: data.length ? data : [Array(10).fill("")],
@@ -46,9 +77,10 @@ export async function GET(_req: NextRequest, { params }: Params) {
     return NextResponse.json({ sheets });
   } catch (error) {
     console.error("Excel read error:", error);
+    const message = error instanceof Error ? error.message : "Failed to read Excel file";
     return NextResponse.json(
-      { error: "Failed to read Excel file" },
-      { status: 500 }
+      { error: message },
+      { status: error instanceof Error && message.includes("exceeds") ? 400 : 500 }
     );
   }
 }
@@ -60,6 +92,48 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     const { id } = await params;
     const { sheets } = await req.json();
+
+    // Security: Validate sheets input
+    if (!Array.isArray(sheets) || sheets.length === 0) {
+      return NextResponse.json({ error: "Invalid sheets data" }, { status: 400 });
+    }
+
+    if (sheets.length > MAX_SHEETS) {
+      return NextResponse.json(
+        { error: `Too many sheets (max ${MAX_SHEETS})` },
+        { status: 400 }
+      );
+    }
+
+    // Validate each sheet
+    for (const sheet of sheets) {
+      if (!sheet.name || !Array.isArray(sheet.data)) {
+        return NextResponse.json({ error: "Invalid sheet format" }, { status: 400 });
+      }
+      if (sheet.data.length > MAX_ROWS) {
+        return NextResponse.json(
+          { error: `Sheet exceeds maximum rows (${MAX_ROWS})` },
+          { status: 400 }
+        );
+      }
+      if (sheet.data[0] && sheet.data[0].length > MAX_COLS) {
+        return NextResponse.json(
+          { error: `Sheet exceeds maximum columns (${MAX_COLS})` },
+          { status: 400 }
+        );
+      }
+      // Validate that all values are strings
+      for (const row of sheet.data) {
+        for (const cell of row) {
+          if (typeof cell !== "string") {
+            return NextResponse.json(
+              { error: "All cell values must be strings" },
+              { status: 400 }
+            );
+          }
+        }
+      }
+    }
 
     await dbConnect();
 
@@ -80,6 +154,14 @@ export async function POST(req: NextRequest, { params }: Params) {
     });
 
     const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+
+    // Security: Check resulting file size
+    if (buffer.length > MAX_FILE_SIZE) {
+      return NextResponse.json(
+        { error: `Generated file exceeds maximum size of ${MAX_FILE_SIZE / 1024 / 1024}MB` },
+        { status: 400 }
+      );
+    }
 
     const bucket = await getBucket();
 
