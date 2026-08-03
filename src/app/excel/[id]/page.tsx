@@ -307,30 +307,41 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
             <p className="text-sm text-[var(--color-muted)]">No revisions yet</p>
           ) : (
             <div className="space-y-2">
-              {sortedRevisions.map((rev) => (
-                <div
-                  key={rev._id}
-                  className="flex items-start justify-between rounded-md bg-white px-3 py-2 text-sm"
-                >
-                  <div className="flex-1">
-                    <p className="font-medium">Version {rev.versionNumber}</p>
-                    <p className="text-xs text-[var(--color-muted)]">
-                      {rev.changedBy} · {new Date(rev.createdAt).toLocaleString()}
-                    </p>
-                    {rev.changesSummary && (
-                      <p className="mt-1 text-xs text-[var(--color-text)]">{rev.changesSummary}</p>
-                    )}
-                  </div>
-                  <span className="ml-2 shrink-0 text-xs text-[var(--color-muted)]">{(rev.size / 1024).toFixed(1)} KB</span>
-                  <button
-                    onClick={() => handleRestore(rev.versionNumber)}
-                    disabled={saving}
-                    className="ml-2 shrink-0 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-blue-50 disabled:opacity-50"
+              {sortedRevisions.map((rev) => {
+                const unavailable = rev.fileAvailable === false;
+                return (
+                  <div
+                    key={rev._id}
+                    className={`flex items-start justify-between rounded-md bg-white px-3 py-2 text-sm ${unavailable ? "opacity-60" : ""}`}
                   >
-                    Restore
-                  </button>
-                </div>
-              ))}
+                    <div className="flex-1">
+                      <p className="font-medium">
+                        Version {rev.versionNumber}
+                        {unavailable && (
+                          <span className="ml-2 text-xs font-normal text-[var(--color-danger)]">
+                            unavailable — file data lost
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-xs text-[var(--color-muted)]">
+                        {rev.changedBy} · {new Date(rev.createdAt).toLocaleString()}
+                      </p>
+                      {rev.changesSummary && (
+                        <p className="mt-1 text-xs text-[var(--color-text)]">{rev.changesSummary}</p>
+                      )}
+                    </div>
+                    <span className="ml-2 shrink-0 text-xs text-[var(--color-muted)]">{(rev.size / 1024).toFixed(1)} KB</span>
+                    <button
+                      onClick={() => handleRestore(rev.versionNumber)}
+                      disabled={saving || unavailable}
+                      title={unavailable ? "This version's file data no longer exists and can't be restored" : undefined}
+                      className="ml-2 shrink-0 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-blue-50 disabled:opacity-50 disabled:hover:bg-transparent"
+                    >
+                      Restore
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

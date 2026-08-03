@@ -64,4 +64,7 @@ export interface RevisionDoc {
   changesSummary: string;
   size: number;
   createdAt: string;
+  // False when the underlying GridFS blob is missing (e.g. orphaned by a fixed
+  // historical bug); such revisions can be viewed in history but not restored.
+  fileAvailable?: boolean;
 }
