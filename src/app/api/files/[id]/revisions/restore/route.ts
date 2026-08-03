@@ -4,6 +4,7 @@ import RevisionModel from "@/models/Revision";
 import FileModel from "@/models/File";
 import { requireUser } from "@/lib/session";
 import { getBucket } from "@/lib/gridfs";
+import { Readable } from "stream";
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -31,26 +32,38 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     const bucket = await getBucket();
 
+    // Read revision file
+    const downloadStream = bucket.openDownloadStream(revision.gridFsId);
+    const chunks: Buffer[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      downloadStream.on("data", (chunk) => chunks.push(chunk));
+      downloadStream.on("end", () => resolve());
+      downloadStream.on("error", reject);
+    });
+
+    const buffer = Buffer.concat(chunks);
+
     // Delete current file
     try {
       await bucket.delete(file.gridFsId);
     } catch (err) {
-      // Ignore
+      // Ignore if file doesn't exist
     }
 
-    // Copy revision file to new location
-    const downloadStream = bucket.openDownloadStream(revision.gridFsId);
+    // Upload restored file
     const uploadStream = bucket.openUploadStream(file.originalName);
 
     await new Promise<void>((resolve, reject) => {
       uploadStream.on("error", reject);
-      downloadStream.on("error", reject);
-      downloadStream.pipe(uploadStream);
+      const readable = Readable.from([buffer]);
+      readable.pipe(uploadStream, { end: true });
       uploadStream.on("finish", () => resolve());
     });
 
-    // Update file record
+    // Update file record with new gridFsId
     file.gridFsId = uploadStream.id;
+    file.updatedAt = new Date();
     await file.save();
 
     return NextResponse.json({
