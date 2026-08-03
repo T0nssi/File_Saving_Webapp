@@ -103,12 +103,10 @@ export async function POST(req: NextRequest, { params }: Params) {
       file.currentVersion = nextVersion;
       await file.save();
 
-      // Delete previous current file only after everything succeeded
-      try {
-        await bucket.delete(oldGridFsId);
-      } catch (err) {
-        // Ignore if file doesn't exist
-      }
+      // Note: oldGridFsId is NOT deleted — restoreRevision now owns that blob as
+      // its permanent snapshot. Deleting it here would break the revision the
+      // moment it's created (this was the actual cause of "file no longer exists"
+      // on restore, beyond just pre-fix legacy data).
 
       return NextResponse.json({
         success: true,

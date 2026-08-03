@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { dbConnect } from "@/lib/mongodb";
 import { getBucket } from "@/lib/gridfs";
 import FileModel from "@/models/File";
+import RevisionModel from "@/models/Revision";
 import { logEvent } from "@/lib/logger";
 import { requireUser } from "@/lib/session";
 import {
@@ -115,6 +116,20 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     } catch {
       // File bytes may already be gone; still remove the metadata record.
     }
+
+    // Revisions each own a permanent GridFS blob (see excel/route.ts and
+    // revisions/restore/route.ts) — deleting the file must also reclaim those,
+    // otherwise every past save/restore leaks storage forever.
+    const revisions = await RevisionModel.find({ fileId: id }).select("gridFsId").lean();
+    for (const rev of revisions) {
+      try {
+        await bucket.delete(rev.gridFsId);
+      } catch {
+        // Blob may already be gone; continue cleaning up the rest.
+      }
+    }
+    await RevisionModel.deleteMany({ fileId: id });
+
     await doc.deleteOne();
 
     await logEvent({

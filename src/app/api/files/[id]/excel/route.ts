@@ -460,12 +460,9 @@ export async function POST(req: NextRequest, { params }: Params) {
       file.currentVersion = nextVersion;
       await file.save();
 
-      // Delete old file AFTER revision is saved
-      try {
-        await bucket.delete(oldGridFsId);
-      } catch (err) {
-        // Ignore if file doesn't exist
-      }
+      // Note: oldGridFsId is NOT deleted — the revision just created above now owns
+      // that blob as its permanent snapshot. Deleting it here would break the
+      // revision the moment it's created.
 
       return NextResponse.json({
         success: true,
