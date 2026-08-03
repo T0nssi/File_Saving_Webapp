@@ -207,31 +207,54 @@ export async function POST(req: NextRequest, { params }: Params) {
       const originalSheet = originalWorkbook?.Sheets[sheet.name];
 
       if (originalSheet) {
-        // Create new worksheet with data and copy formatting from original
-        const newWorksheet = XLSX.utils.aoa_to_sheet(sheet.data);
+        // Start with a deep copy of the original sheet to preserve ALL formatting
+        const newWorksheet: any = {};
 
-        // Copy styles, merges, and other formatting from original
+        // Copy all non-cell properties first (merges, column widths, row heights, etc)
         Object.keys(originalSheet).forEach((key) => {
-          // Skip data cells (they start with letters like A1, B2, etc)
-          if (!/^[A-Z]+\d+$/.test(key)) {
-            // Copy meta information and formatting
-            newWorksheet[key] = originalSheet[key];
+          // These are metadata keys that should always be copied
+          if (key.startsWith("!")) {
+            newWorksheet[key] = JSON.parse(JSON.stringify(originalSheet[key]));
           }
         });
 
-        // Copy over style information for existing cells
-        Object.keys(originalSheet).forEach((cellKey) => {
-          const match = cellKey.match(/^([A-Z]+)(\d+)$/);
-          if (match) {
-            // If cell exists in original and has style, apply to new worksheet
-            const originalCell = originalSheet[cellKey];
-            const cellInNewSheet = newWorksheet[cellKey];
-
-            if (originalCell && cellInNewSheet && originalCell.s) {
-              cellInNewSheet.s = originalCell.s;
+        // Now update cell values with new data while keeping formatting
+        sheet.data.forEach((row, rowIdx) => {
+          row.forEach((value, colIdx) => {
+            const XLSX_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            let colName = "";
+            let col = colIdx;
+            while (col >= 0) {
+              colName = XLSX_letters[col % 26] + colName;
+              col = Math.floor(col / 26) - 1;
             }
-          }
+            const cellAddress = colName + (rowIdx + 1);
+
+            // Get original cell to preserve style
+            const originalCell = originalSheet[cellAddress];
+
+            if (originalCell && originalCell.s) {
+              // Preserve original cell with updated value
+              newWorksheet[cellAddress] = {
+                v: value,
+                t: "s",
+                s: originalCell.s,
+              };
+            } else {
+              // Simple cell without style
+              newWorksheet[cellAddress] = {
+                v: value,
+                t: "s",
+              };
+            }
+          });
         });
+
+        // Ensure we have the required range property
+        if (!newWorksheet["!ref"]) {
+          const maxCol = Math.max(...sheet.data.map(row => row.length));
+          newWorksheet["!ref"] = `A1:${String.fromCharCode(64 + maxCol)}${sheet.data.length}`;
+        }
 
         XLSX.utils.book_append_sheet(workbook, newWorksheet, sheet.name);
       } else {
