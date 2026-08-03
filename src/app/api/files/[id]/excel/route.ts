@@ -403,12 +403,9 @@ export async function POST(req: NextRequest, { params }: Params) {
       );
     }
 
-    // Delete old file
-    try {
-      await bucket.delete(file.gridFsId);
-    } catch (err) {
-      // Ignore if file doesn't exist
-    }
+    // Save current file reference BEFORE uploading new file
+    const oldGridFsId = file.gridFsId;
+    const oldSize = file.size;
 
     // Upload new file and wait for the ID
     const uploadStream = bucket.openUploadStream(file.originalName);
@@ -423,10 +420,6 @@ export async function POST(req: NextRequest, { params }: Params) {
     // Get previous revision count for version numbering
     const previousRevisions = await RevisionModel.find({ fileId: id }).sort({ versionNumber: -1 }).limit(1);
     const nextVersion = (previousRevisions[0]?.versionNumber ?? 0) + 1;
-
-    // Save current file as a revision BEFORE we update it
-    const oldGridFsId = file.gridFsId;
-    const oldSize = file.size;
 
     // Generate detailed change summary
     let changesSummary = `Edited by ${requester.username}`;
@@ -450,6 +443,13 @@ export async function POST(req: NextRequest, { params }: Params) {
     file.size = buffer.length;
     file.gridFsId = uploadStream.id;
     await file.save();
+
+    // Delete old file AFTER revision is saved
+    try {
+      await bucket.delete(oldGridFsId);
+    } catch (err) {
+      // Ignore if file doesn't exist
+    }
 
     return NextResponse.json({
       success: true,
