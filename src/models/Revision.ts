@@ -24,6 +24,7 @@ const RevisionSchema = new Schema<IRevision>(
   }
 );
 
-RevisionSchema.index({ fileId: 1, versionNumber: 1 });
+// Unique guards against duplicate versions from concurrent saves racing past the atomic counter.
+RevisionSchema.index({ fileId: 1, versionNumber: 1 }, { unique: true });
 
 export default (models.Revision as mongoose.Model<IRevision>) || model<IRevision>("Revision", RevisionSchema);

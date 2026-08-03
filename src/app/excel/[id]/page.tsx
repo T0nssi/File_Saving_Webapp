@@ -23,46 +23,75 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [revisionsWarning, setRevisionsWarning] = useState<string | null>(null);
   const [showRevisions, setShowRevisions] = useState(false);
   const [showCloneDialog, setShowCloneDialog] = useState(false);
   const [cloneFilename, setCloneFilename] = useState("");
   const [loading, setLoading] = useState(true);
+  // Bumped whenever `sheets` is replaced from the server (initial load, restore) so
+  // ExcelEditor remounts and picks up the new data instead of keeping its stale internal state.
+  const [sheetsVersion, setSheetsVersion] = useState(0);
 
   useEffect(() => {
-    fetchFile();
-    fetchSheets();
-    fetchRevisions();
+    let cancelled = false;
+
+    async function fetchFile() {
+      try {
+        const res = await apiFetch(`/api/files/${id}`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.file) {
+          setFile(data.file);
+        } else {
+          setLoadError(data.error ?? "File not found");
+        }
+      } catch (err) {
+        if (!cancelled) setLoadError("Failed to load file");
+      }
+    }
+
+    async function fetchSheets() {
+      try {
+        const res = await apiFetch(`/api/files/${id}/excel`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.sheets) {
+          setSheets(data.sheets);
+          setSheetsVersion((v) => v + 1);
+        } else {
+          setLoadError(data.error ?? "Failed to load sheets");
+        }
+      } catch (err) {
+        if (!cancelled) setLoadError("Failed to load Excel file");
+      }
+    }
+
+    async function fetchRevisionsInitial() {
+      try {
+        const res = await apiFetch(`/api/files/${id}/revisions`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.revisions) {
+          setRevisions(data.revisions);
+          setRevisionsWarning(null);
+        } else {
+          setRevisionsWarning(data.error ?? "Revision history unavailable");
+        }
+      } catch (err) {
+        if (!cancelled) setRevisionsWarning("Revision history unavailable");
+      }
+    }
+
+    // Run independently so one failure doesn't clobber another's error/success state.
+    Promise.all([fetchFile(), fetchSheets(), fetchRevisionsInitial()]).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
-
-  async function fetchFile() {
-    try {
-      const res = await apiFetch(`/api/files/${id}`);
-      const data = await res.json();
-      if (data.file) {
-        setFile(data.file);
-      } else {
-        setError(data.error ?? "File not found");
-      }
-    } catch (err) {
-      setError("Failed to load file");
-    }
-  }
-
-  async function fetchSheets() {
-    try {
-      const res = await apiFetch(`/api/files/${id}/excel`);
-      const data = await res.json();
-      if (data.sheets) {
-        setSheets(data.sheets);
-      } else {
-        setError(data.error ?? "Failed to load sheets");
-      }
-    } catch (err) {
-      setError("Failed to load Excel file");
-    } finally {
-      setLoading(false);
-    }
-  }
 
   async function fetchRevisions() {
     try {
@@ -70,13 +99,16 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
       const data = await res.json();
       if (data.revisions) {
         setRevisions(data.revisions);
+        setRevisionsWarning(null);
+      } else {
+        setRevisionsWarning(data.error ?? "Revision history unavailable");
       }
     } catch (err) {
-      console.error("Failed to load revisions");
+      setRevisionsWarning("Revision history unavailable");
     }
   }
 
-  async function handleSave(newSheets: Sheet[]) {
+  async function handleSave(newSheets: Sheet[]): Promise<boolean> {
     setSaving(true);
     setSaved(false);
     setError(null);
@@ -89,14 +121,17 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
       const data = await res.json();
       if (!res.ok) {
         setError(data.error ?? "Save failed");
+        return false;
       } else {
         setSaved(true);
         setTimeout(() => setSaved(false), 2000);
         setSheets(newSheets);
         await fetchRevisions();
+        return true;
       }
     } catch (err) {
       setError("Network error — is the server running?");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -115,7 +150,12 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
       if (!res.ok) {
         setError(data.error ?? "Restore failed");
       } else {
-        await fetchSheets();
+        const res2 = await apiFetch(`/api/files/${id}/excel`);
+        const sheetsData = await res2.json();
+        if (sheetsData.sheets) {
+          setSheets(sheetsData.sheets);
+          setSheetsVersion((v) => v + 1);
+        }
         await fetchRevisions();
       }
     } catch (err) {
@@ -152,10 +192,10 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
     }
   }
 
-  if (error && !file) {
+  if (loadError && !file) {
     return (
       <div className="mx-auto max-w-xl text-center">
-        <p className="text-sm text-[var(--color-danger)]">{error}</p>
+        <p className="text-sm text-[var(--color-danger)]">{loadError}</p>
         <Link href="/search" className="mt-3 inline-block text-sm text-[var(--color-accent)]">
           Back to search
         </Link>
@@ -166,6 +206,8 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
   if (!file || loading) {
     return <p className="text-sm text-[var(--color-muted)]">Loading…</p>;
   }
+
+  const sortedRevisions = [...revisions].sort((a, b) => b.versionNumber - a.versionNumber);
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -256,25 +298,34 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
       {showRevisions && (
         <div className="rounded-lg border border-[var(--color-border)] bg-zinc-50 p-4">
           <h2 className="mb-3 font-semibold">Revision History</h2>
-          {revisions.length === 0 ? (
+          {revisionsWarning && (
+            <div className="mb-3 flex items-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              <AlertTriangle size={14} /> {revisionsWarning}
+            </div>
+          )}
+          {sortedRevisions.length === 0 ? (
             <p className="text-sm text-[var(--color-muted)]">No revisions yet</p>
           ) : (
             <div className="space-y-2">
-              {revisions.map((rev) => (
+              {sortedRevisions.map((rev) => (
                 <div
                   key={rev._id}
-                  className="flex items-center justify-between rounded-md bg-white px-3 py-2 text-sm"
+                  className="flex items-start justify-between rounded-md bg-white px-3 py-2 text-sm"
                 >
                   <div className="flex-1">
                     <p className="font-medium">Version {rev.versionNumber}</p>
                     <p className="text-xs text-[var(--color-muted)]">
                       {rev.changedBy} · {new Date(rev.createdAt).toLocaleString()}
                     </p>
+                    {rev.changesSummary && (
+                      <p className="mt-1 text-xs text-[var(--color-text)]">{rev.changesSummary}</p>
+                    )}
                   </div>
-                  <span className="text-xs text-[var(--color-muted)]">{(rev.size / 1024).toFixed(1)} KB</span>
+                  <span className="ml-2 shrink-0 text-xs text-[var(--color-muted)]">{(rev.size / 1024).toFixed(1)} KB</span>
                   <button
                     onClick={() => handleRestore(rev.versionNumber)}
-                    className="ml-2 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-blue-50"
+                    disabled={saving}
+                    className="ml-2 shrink-0 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-blue-50 disabled:opacity-50"
                   >
                     Restore
                   </button>
@@ -287,6 +338,7 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
 
       {sheets.length > 0 && (
         <ExcelEditor
+          key={sheetsVersion}
           fileId={id}
           filename={file.filename}
           initialSheets={sheets}

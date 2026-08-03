@@ -4,6 +4,7 @@ import FileModel from "@/models/File";
 import { requireUser } from "@/lib/session";
 import { getBucket } from "@/lib/gridfs";
 import { Readable } from "stream";
+import type mongoose from "mongoose";
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -40,32 +41,51 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     // Upload as new file
     const uploadStream = bucket.openUploadStream(newFilename);
-    await new Promise<void>((resolve, reject) => {
-      uploadStream.on("error", reject);
-      const readable = Readable.from([buffer]);
-      readable.pipe(uploadStream, { end: true });
-      uploadStream.on("finish", () => resolve());
-    });
+    let uploadedId: mongoose.Types.ObjectId | undefined;
 
-    // Create new file record
-    const newFile = new FileModel({
-      filename: newFilename,
-      originalName: newFilename,
-      mimeType: sourceFile.mimeType,
-      size: buffer.length,
-      gridFsId: uploadStream.id,
-      tags: sourceFile.tags,
-      description: `Copy of ${sourceFile.filename}`,
-      folderId: sourceFile.folderId,
-      uploadedBy: requester.username,
-    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        uploadStream.on("error", reject);
+        const readable = Readable.from([buffer]);
+        readable.pipe(uploadStream, { end: true });
+        uploadStream.on("finish", () => resolve());
+      });
 
-    await newFile.save();
+      uploadedId = uploadStream.id as mongoose.Types.ObjectId;
+      if (!uploadedId) {
+        throw new Error("Upload did not return a valid file ID");
+      }
 
-    return NextResponse.json({
-      success: true,
-      file: newFile.toObject(),
-    });
+      // Create new file record
+      const newFile = new FileModel({
+        filename: newFilename,
+        originalName: newFilename,
+        mimeType: sourceFile.mimeType,
+        size: buffer.length,
+        gridFsId: uploadedId,
+        tags: sourceFile.tags,
+        description: `Copy of ${sourceFile.filename}`,
+        folderId: sourceFile.folderId,
+        uploadedBy: requester.username,
+      });
+
+      await newFile.save();
+
+      return NextResponse.json({
+        success: true,
+        file: newFile.toObject(),
+      });
+    } catch (err) {
+      // Roll back the orphaned upload so GridFS doesn't leak storage on failure.
+      if (uploadedId) {
+        try {
+          await bucket.delete(uploadedId);
+        } catch {
+          // Best effort cleanup only
+        }
+      }
+      throw err;
+    }
   } catch (error) {
     console.error("File clone error:", error);
     return NextResponse.json(

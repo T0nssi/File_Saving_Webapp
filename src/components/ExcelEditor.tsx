@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Save, RotateCcw, MoreVertical, ChevronDown, Eye, Download, Copy, Edit2 } from "lucide-react";
 
 interface Sheet {
@@ -11,9 +11,16 @@ interface Sheet {
 interface ExcelEditorProps {
   fileId: string;
   filename: string;
-  onSave: (sheets: Sheet[]) => Promise<void>;
+  onSave: (sheets: Sheet[]) => Promise<boolean>;
   initialSheets: Sheet[];
   saving: boolean;
+}
+
+const MAX_HISTORY = 50;
+const DEFAULT_COL_WIDTH = 100;
+
+function columnWidthsStorageKey(fileId: string) {
+  return `excel-editor:col-widths:${fileId}`;
 }
 
 export default function ExcelEditor({ fileId, filename, onSave, initialSheets, saving }: ExcelEditorProps) {
@@ -22,10 +29,31 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   const [history, setHistory] = useState<Sheet[][]>([initialSheets]);
   const [showMenu, setShowMenu] = useState(false);
   const [editingSheetName, setEditingSheetName] = useState<number | null>(null);
+  const [sheetNameError, setSheetNameError] = useState<string | null>(null);
   const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
   const menuRef = useRef<HTMLDivElement>(null);
+  const activeResizeCleanup = useRef<(() => void) | null>(null);
 
   const currentSheet = sheets[activeSheet] ?? { name: "", data: [] };
+
+  const pushHistory = useCallback((newSheets: Sheet[]) => {
+    setHistory((prev) => {
+      const next = [...prev, newSheets];
+      return next.length > MAX_HISTORY ? next.slice(next.length - MAX_HISTORY) : next;
+    });
+  }, []);
+
+  // Load persisted column widths for this file
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(columnWidthsStorageKey(fileId));
+      if (raw) {
+        setColumnWidths(JSON.parse(raw));
+      }
+    } catch {
+      // Ignore malformed/unavailable storage
+    }
+  }, [fileId]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -35,6 +63,13 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Clean up any in-flight column-resize listeners if the component unmounts mid-drag
+  useEffect(() => {
+    return () => {
+      activeResizeCleanup.current?.();
+    };
   }, []);
 
   const handleCellChange = (row: number, col: number, value: string) => {
@@ -51,7 +86,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
         : s
     );
     setSheets(newSheets);
-    setHistory([...history, newSheets]);
+    pushHistory(newSheets);
   };
 
   const addRow = () => {
@@ -64,7 +99,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
         : s
     );
     setSheets(newSheets);
-    setHistory([...history, newSheets]);
+    pushHistory(newSheets);
   };
 
   const addColumn = () => {
@@ -77,7 +112,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
         : s
     );
     setSheets(newSheets);
-    setHistory([...history, newSheets]);
+    pushHistory(newSheets);
   };
 
   const undo = () => {
@@ -91,55 +126,115 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     }
   };
 
-  const handleSave = async () => {
-    await onSave(sheets);
+  const handleSave = useCallback(async () => {
+    if (saving) return;
+    const success = await onSave(sheets);
+    if (success) {
+      // Collapse history back to a single baseline so the dirty check and undo
+      // button both reflect "nothing to lose" right after a successful save.
+      setHistory([sheets]);
+    }
+  }, [onSave, sheets, saving]);
+
+  // Ctrl+S / Cmd+S saves instead of triggering the browser's save-page dialog
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        handleSave();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [handleSave]);
+
+  // Warn on tab close/refresh if there are unsaved edits (history grew past the baseline).
+  useEffect(() => {
+    function handleBeforeUnload(e: BeforeUnloadEvent) {
+      if (history.length > 1) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [history.length]);
+
+  const isDuplicateName = (name: string, excludeIndex: number) => {
+    const key = name.trim().toLowerCase();
+    return sheets.some((s, idx) => idx !== excludeIndex && s.name.trim().toLowerCase() === key);
   };
 
   const renameSheet = (sheetIndex: number, newName: string) => {
-    if (newName.trim()) {
-      const newSheets = sheets.map((s, idx) =>
-        idx === sheetIndex ? { ...s, name: newName.trim() } : s
-      );
-      setSheets(newSheets);
-      setHistory([...history, newSheets]);
+    const trimmed = newName.trim();
+    if (!trimmed) {
+      setEditingSheetName(null);
+      return;
     }
+    if (isDuplicateName(trimmed, sheetIndex)) {
+      setSheetNameError(`A sheet named "${trimmed}" already exists`);
+      return;
+    }
+    const newSheets = sheets.map((s, idx) =>
+      idx === sheetIndex ? { ...s, name: trimmed } : s
+    );
+    setSheets(newSheets);
+    pushHistory(newSheets);
+    setSheetNameError(null);
     setEditingSheetName(null);
   };
 
   const cloneSheet = () => {
     const sheet = sheets[activeSheet];
-    if (sheet) {
-      const newName = `${sheet.name} (copy)`;
-      const newSheet = {
-        name: newName,
-        data: sheet.data.map(row => [...row]),
-      };
-      const newSheets = [...sheets, newSheet];
-      setSheets(newSheets);
-      setHistory([...history, newSheets]);
+    if (!sheet) return;
+
+    let candidate = `${sheet.name} (copy)`;
+    let suffix = 2;
+    while (isDuplicateName(candidate, -1)) {
+      candidate = `${sheet.name} (copy ${suffix})`;
+      suffix += 1;
     }
+
+    const newSheet = {
+      name: candidate,
+      data: sheet.data.map(row => [...row]),
+    };
+    const newSheets = [...sheets, newSheet];
+    setSheets(newSheets);
+    pushHistory(newSheets);
   };
 
   const handleMouseDown = (e: React.MouseEvent, colIdx: number) => {
     const startX = e.clientX;
-    const startWidth = columnWidths[colIdx] || 100;
+    const startWidth = columnWidths[colIdx] || DEFAULT_COL_WIDTH;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const delta = moveEvent.clientX - startX;
       const newWidth = Math.max(50, startWidth + delta);
-      setColumnWidths(prev => ({
-        ...prev,
-        [colIdx]: newWidth,
-      }));
+      setColumnWidths(prev => {
+        const next = { ...prev, [colIdx]: newWidth };
+        try {
+          window.localStorage.setItem(columnWidthsStorageKey(fileId), JSON.stringify(next));
+        } catch {
+          // Ignore storage failures (quota, privacy mode, etc.)
+        }
+        return next;
+      });
+    };
+
+    const cleanup = () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+      activeResizeCleanup.current = null;
     };
 
     const handleMouseUp = () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      cleanup();
     };
 
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
+    activeResizeCleanup.current = cleanup;
     e.preventDefault();
   };
 
@@ -156,41 +251,49 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <div className="flex gap-2">
-          {sheets.map((sheet, idx) => (
-            <div
-              key={idx}
-              className={`rounded-md transition-colors ${
-                activeSheet === idx
-                  ? "bg-[var(--color-accent)] text-white"
-                  : "bg-zinc-100 hover:bg-zinc-200"
-              }`}
-            >
-              {editingSheetName === idx ? (
-                <input
-                  autoFocus
-                  type="text"
-                  defaultValue={sheet.name}
-                  onBlur={(e) => renameSheet(idx, e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") renameSheet(idx, e.currentTarget.value);
-                    if (e.key === "Escape") setEditingSheetName(null);
-                  }}
-                  className="w-32 rounded-md border-0 px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-offset-1"
-                />
-              ) : (
-                <button
-                  onClick={() => setActiveSheet(idx)}
-                  onDoubleClick={() => setEditingSheetName(idx)}
-                  className="flex items-center gap-1 px-3 py-2 text-sm font-medium"
-                  title="Double-click to rename"
-                >
-                  {sheet.name}
-                  {activeSheet === idx && <Edit2 size={12} className="opacity-50" />}
-                </button>
-              )}
-            </div>
-          ))}
+        <div className="flex flex-col gap-1">
+          <div className="flex gap-2">
+            {sheets.map((sheet, idx) => (
+              <div
+                key={`${idx}:${sheet.name}`}
+                className={`rounded-md transition-colors ${
+                  activeSheet === idx
+                    ? "bg-[var(--color-accent)] text-white"
+                    : "bg-zinc-100 hover:bg-zinc-200"
+                }`}
+              >
+                {editingSheetName === idx ? (
+                  <input
+                    autoFocus
+                    type="text"
+                    defaultValue={sheet.name}
+                    onBlur={(e) => renameSheet(idx, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") renameSheet(idx, e.currentTarget.value);
+                      if (e.key === "Escape") {
+                        setSheetNameError(null);
+                        setEditingSheetName(null);
+                      }
+                    }}
+                    className="w-32 rounded-md border-0 px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-offset-1"
+                  />
+                ) : (
+                  <button
+                    onClick={() => setActiveSheet(idx)}
+                    onDoubleClick={() => setEditingSheetName(idx)}
+                    className="flex items-center gap-1 px-3 py-2 text-sm font-medium"
+                    title="Double-click to rename"
+                  >
+                    {sheet.name}
+                    {activeSheet === idx && <Edit2 size={12} className="opacity-50" />}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {sheetNameError && (
+            <p className="text-xs text-[var(--color-danger)]">{sheetNameError}</p>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -249,6 +352,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
             onClick={handleSave}
             disabled={saving}
             className="flex items-center gap-2 rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
+            title="Save (Ctrl+S)"
           >
             <Save size={16} /> {saving ? "Saving..." : "Save"}
           </button>

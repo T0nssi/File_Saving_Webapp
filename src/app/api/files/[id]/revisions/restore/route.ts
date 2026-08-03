@@ -5,6 +5,7 @@ import FileModel from "@/models/File";
 import { requireUser } from "@/lib/session";
 import { getBucket } from "@/lib/gridfs";
 import { Readable } from "stream";
+import type mongoose from "mongoose";
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -44,32 +45,76 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     const buffer = Buffer.concat(chunks);
 
-    // Delete current file
-    try {
-      await bucket.delete(file.gridFsId);
-    } catch (err) {
-      // Ignore if file doesn't exist
-    }
-
-    // Upload restored file
+    // Upload restored file (before touching the current one, so a failure here leaves the file untouched)
     const uploadStream = bucket.openUploadStream(file.originalName);
+    let uploadedId: mongoose.Types.ObjectId | undefined;
 
-    await new Promise<void>((resolve, reject) => {
-      uploadStream.on("error", reject);
-      const readable = Readable.from([buffer]);
-      readable.pipe(uploadStream, { end: true });
-      uploadStream.on("finish", () => resolve());
-    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        uploadStream.on("error", reject);
+        const readable = Readable.from([buffer]);
+        readable.pipe(uploadStream, { end: true });
+        uploadStream.on("finish", () => resolve());
+      });
 
-    // Update file record with new gridFsId
-    file.gridFsId = uploadStream.id;
-    file.updatedAt = new Date();
-    await file.save();
+      uploadedId = uploadStream.id as mongoose.Types.ObjectId;
+      if (!uploadedId) {
+        throw new Error("Upload did not return a valid file ID");
+      }
 
-    return NextResponse.json({
-      success: true,
-      file: file.toObject(),
-    });
+      // Atomically claim the next version number so restore participates in the same counter as saves.
+      const updatedForVersion = await FileModel.findByIdAndUpdate(
+        id,
+        { $inc: { currentVersion: 1 } },
+        { new: true }
+      );
+      if (!updatedForVersion) {
+        throw new Error("File not found during version update");
+      }
+      const nextVersion = updatedForVersion.currentVersion;
+
+      // Record the restore itself as a new revision so history stays linear (git-style revert).
+      const oldGridFsId = file.gridFsId;
+      const oldSize = file.size;
+      const restoreRevision = new RevisionModel({
+        fileId: id,
+        versionNumber: nextVersion,
+        gridFsId: oldGridFsId,
+        changedBy: requester.username,
+        changesSummary: `Restored to version ${versionNumber} by ${requester.username}`,
+        size: oldSize,
+      });
+      await restoreRevision.save();
+
+      // Update file record with new gridFsId
+      file.gridFsId = uploadedId;
+      file.size = buffer.length;
+      file.currentVersion = nextVersion;
+      await file.save();
+
+      // Delete previous current file only after everything succeeded
+      try {
+        await bucket.delete(oldGridFsId);
+      } catch (err) {
+        // Ignore if file doesn't exist
+      }
+
+      return NextResponse.json({
+        success: true,
+        file: file.toObject(),
+        version: nextVersion,
+      });
+    } catch (err) {
+      // Roll back the orphaned upload so GridFS doesn't leak storage on failure.
+      if (uploadedId) {
+        try {
+          await bucket.delete(uploadedId);
+        } catch {
+          // Best effort cleanup only
+        }
+      }
+      throw err;
+    }
   } catch (error) {
     console.error("Revision restore error:", error);
     return NextResponse.json(

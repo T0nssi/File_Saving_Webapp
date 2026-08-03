@@ -10,6 +10,7 @@ export interface IFile {
   description: string;
   folderId: mongoose.Types.ObjectId | null;
   uploadedBy: string;
+  currentVersion: number;
   uploadedAt: Date;
   updatedAt: Date;
 }
@@ -26,6 +27,8 @@ const FileSchema = new Schema<IFile>(
     // null = not filed into any folder yet ("ยังไม่จัดหมวด" in the UI).
     folderId: { type: Schema.Types.ObjectId, ref: "Folder", default: null, index: true },
     uploadedBy: { type: String, default: "", trim: true, maxlength: 40 },
+    // Monotonically incremented via atomic $inc on each Excel save; source of truth for revision versionNumber.
+    currentVersion: { type: Number, default: 0 },
   },
   {
     timestamps: { createdAt: "uploadedAt", updatedAt: "updatedAt" },

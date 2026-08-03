@@ -5,7 +5,9 @@ import FileModel from "@/models/File";
 import RevisionModel from "@/models/Revision";
 import { requireUser } from "@/lib/session";
 import { getBucket } from "@/lib/gridfs";
+import { getColumnLetter, getCellAddress } from "@/lib/excelUtils";
 import { Readable } from "stream";
+import type mongoose from "mongoose";
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -47,16 +49,8 @@ function compareSheetData(
 
         // Only record if value actually changed
         if (newValue !== oldValue) {
-          // Convert column index to letter (0 = A, 1 = B, etc)
-          let colName = "";
-          let col = colIdx;
-          while (col >= 0) {
-            colName = String.fromCharCode(65 + (col % 26)) + colName;
-            col = Math.floor(col / 26) - 1;
-          }
-
           changes.push({
-            cell: `${colName}${rowIdx + 1}`,
+            cell: getCellAddress(rowIdx, colIdx),
             sheet: newSheet.name,
             oldValue: oldValue,
             newValue: newValue,
@@ -243,8 +237,9 @@ export async function POST(req: NextRequest, { params }: Params) {
           })
         );
 
-        // Check columns
-        if (normalizedData[0] && normalizedData[0].length > MAX_COLS) {
+        // Check columns across every row, not just the first (ragged arrays)
+        const maxRowLength = normalizedData.reduce((max, row) => Math.max(max, row.length), 0);
+        if (maxRowLength > MAX_COLS) {
           throw new Error(`Sheet exceeds maximum columns (${MAX_COLS})`);
         }
 
@@ -256,6 +251,16 @@ export async function POST(req: NextRequest, { params }: Params) {
     } catch (err) {
       const message = err instanceof Error ? err.message : "Validation failed";
       return NextResponse.json({ error: message }, { status: 400 });
+    }
+
+    // Duplicate sheet name check (case-insensitive, matches Excel's own rule)
+    const seenNames = new Set<string>();
+    for (const sheet of sheets) {
+      const key = sheet.name.trim().toLowerCase();
+      if (seenNames.has(key)) {
+        return NextResponse.json({ error: `Duplicate sheet name: "${sheet.name}"` }, { status: 400 });
+      }
+      seenNames.add(key);
     }
 
     await dbConnect();
@@ -274,6 +279,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     const bucket = await getBucket();
     let originalWorkbook: XLSX.WorkBook | null = null;
     let oldSheets: Sheet[] = [];
+    let styleWarning = false;
 
     try {
       const downloadStream = bucket.openDownloadStream(file.gridFsId);
@@ -285,48 +291,47 @@ export async function POST(req: NextRequest, { params }: Params) {
       originalWorkbook = XLSX.read(originalBuffer, { type: "buffer" });
 
       // Extract old sheets data for change tracking
-      if (originalWorkbook) {
-        oldSheets = originalWorkbook.SheetNames.map((sheetName) => {
-          const worksheet = originalWorkbook!.Sheets[sheetName];
-          if (!worksheet) {
-            return { name: sheetName, data: [Array(10).fill("")] };
+      oldSheets = originalWorkbook.SheetNames.map((sheetName) => {
+        const worksheet = originalWorkbook!.Sheets[sheetName];
+        if (!worksheet) {
+          return { name: sheetName, data: [Array(10).fill("")] };
+        }
+        let data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
+
+        // Trim trailing empty rows
+        while (data.length > 0 && data[data.length - 1]?.every(cell => !cell)) {
+          data.pop();
+        }
+
+        if (data.length === 0) {
+          return { name: sheetName, data: [Array(10).fill("")] };
+        }
+
+        // Trim trailing empty columns
+        let maxCols = Math.max(...data.map(row => row.length));
+        let actualMaxCols = 0;
+        for (let col = 0; col < maxCols; col++) {
+          const hasValue = data.some(row => row[col]);
+          if (hasValue) actualMaxCols = col + 1;
+        }
+
+        // Normalize rows
+        data = data.map(row => {
+          const normalized = [...row];
+          while (normalized.length < actualMaxCols) {
+            normalized.push("");
           }
-          let data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
-
-          // Trim trailing empty rows
-          while (data.length > 0 && data[data.length - 1]?.every(cell => !cell)) {
-            data.pop();
-          }
-
-          if (data.length === 0) {
-            return { name: sheetName, data: [Array(10).fill("")] };
-          }
-
-          // Trim trailing empty columns
-          let maxCols = Math.max(...data.map(row => row.length));
-          let actualMaxCols = 0;
-          for (let col = 0; col < maxCols; col++) {
-            const hasValue = data.some(row => row[col]);
-            if (hasValue) actualMaxCols = col + 1;
-          }
-
-          // Normalize rows
-          data = data.map(row => {
-            const normalized = [...row];
-            while (normalized.length < actualMaxCols) {
-              normalized.push("");
-            }
-            return normalized.slice(0, actualMaxCols);
-          });
-
-          return {
-            name: sheetName,
-            data: data.length ? data : [Array(10).fill("")],
-          };
+          return normalized.slice(0, actualMaxCols);
         });
-      }
+
+        return {
+          name: sheetName,
+          data: data.length ? data : [Array(10).fill("")],
+        };
+      });
     } catch (err) {
-      console.warn("Could not read original file for styling preservation");
+      console.warn("Could not read original file for styling preservation:", err);
+      styleWarning = true;
     }
 
     // Update sheets with new data while preserving original formatting
@@ -353,25 +358,18 @@ export async function POST(req: NextRequest, { params }: Params) {
         // Now update ONLY the cell values with new data while keeping all original formatting
         sheet.data.forEach((row, rowIdx) => {
           row.forEach((value, colIdx) => {
-            const XLSX_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            let colName = "";
-            let col = colIdx;
-            while (col >= 0) {
-              colName = XLSX_letters[col % 26] + colName;
-              col = Math.floor(col / 26) - 1;
-            }
-            const cellAddress = colName + (rowIdx + 1);
+            const cellAddress = getCellAddress(rowIdx, colIdx);
 
             // Get original cell to preserve ALL its properties (style, format, etc)
             const originalCell = newWorksheet[cellAddress];
 
             if (originalCell) {
               // Update value but keep everything else (style, format, type, etc)
-              originalCell.v = value;
               if (value === "") {
                 // For empty cells, remove the value but keep the style
                 delete originalCell.v;
               } else {
+                originalCell.v = value;
                 originalCell.t = "s";
               }
             } else {
@@ -389,7 +387,8 @@ export async function POST(req: NextRequest, { params }: Params) {
         // Ensure we have the required range property
         if (!newWorksheet["!ref"]) {
           const maxCol = Math.max(...sheet.data.map(row => row.length));
-          newWorksheet["!ref"] = `A1:${String.fromCharCode(64 + maxCol)}${sheet.data.length}`;
+          const maxColLetter = maxCol > 0 ? getColumnLetter(maxCol - 1) : "A";
+          newWorksheet["!ref"] = `A1:${maxColLetter}${Math.max(sheet.data.length, 1)}`;
         }
 
         XLSX.utils.book_append_sheet(workbook, newWorksheet, sheet.name);
@@ -416,53 +415,82 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     // Upload new file and wait for the ID
     const uploadStream = bucket.openUploadStream(file.originalName);
+    let uploadedId: mongoose.Types.ObjectId | undefined;
 
-    await new Promise<void>((resolve, reject) => {
-      uploadStream.on("error", reject);
-      const readable = Readable.from([buffer]);
-      readable.pipe(uploadStream, { end: true });
-      uploadStream.on("finish", () => resolve());
-    });
-
-    // Get previous revision count for version numbering
-    const previousRevisions = await RevisionModel.find({ fileId: id }).sort({ versionNumber: -1 }).limit(1);
-    const nextVersion = (previousRevisions[0]?.versionNumber ?? 0) + 1;
-
-    // Generate detailed change summary
-    let changesSummary = `Edited by ${requester.username}`;
-    if (oldSheets.length > 0) {
-      const changes = compareSheetData(oldSheets, sheets);
-      changesSummary = generateChangesSummary(changes);
-    }
-
-    // Create revision of old file (before update)
-    const revision = new RevisionModel({
-      fileId: id,
-      versionNumber: nextVersion,
-      gridFsId: oldGridFsId,
-      changedBy: requester.username,
-      changesSummary: changesSummary,
-      size: oldSize,
-    });
-    await revision.save();
-
-    // Now update file record with new content
-    file.size = buffer.length;
-    file.gridFsId = uploadStream.id;
-    await file.save();
-
-    // Delete old file AFTER revision is saved
     try {
-      await bucket.delete(oldGridFsId);
-    } catch (err) {
-      // Ignore if file doesn't exist
-    }
+      await new Promise<void>((resolve, reject) => {
+        uploadStream.on("error", reject);
+        const readable = Readable.from([buffer]);
+        readable.pipe(uploadStream, { end: true });
+        uploadStream.on("finish", () => resolve());
+      });
 
-    return NextResponse.json({
-      success: true,
-      file: file.toObject(),
-      version: nextVersion,
-    });
+      uploadedId = uploadStream.id as mongoose.Types.ObjectId;
+      if (!uploadedId) {
+        throw new Error("Upload did not return a valid file ID");
+      }
+
+      // Atomically claim the next version number so concurrent saves never collide.
+      const updatedForVersion = await FileModel.findByIdAndUpdate(
+        id,
+        { $inc: { currentVersion: 1 } },
+        { new: true }
+      );
+      if (!updatedForVersion) {
+        throw new Error("File not found during version update");
+      }
+      const nextVersion = updatedForVersion.currentVersion;
+
+      // Generate detailed change summary
+      let changesSummary = `Edited by ${requester.username}`;
+      if (oldSheets.length > 0) {
+        const changes = compareSheetData(oldSheets, sheets);
+        changesSummary = generateChangesSummary(changes);
+      } else if (styleWarning) {
+        changesSummary = `Edited by ${requester.username} (formatting could not be verified)`;
+      }
+
+      // Create revision of old file (before update)
+      const revision = new RevisionModel({
+        fileId: id,
+        versionNumber: nextVersion,
+        gridFsId: oldGridFsId,
+        changedBy: requester.username,
+        changesSummary: changesSummary,
+        size: oldSize,
+      });
+      await revision.save();
+
+      // Now update file record with new content
+      file.size = buffer.length;
+      file.gridFsId = uploadedId;
+      file.currentVersion = nextVersion;
+      await file.save();
+
+      // Delete old file AFTER revision is saved
+      try {
+        await bucket.delete(oldGridFsId);
+      } catch (err) {
+        // Ignore if file doesn't exist
+      }
+
+      return NextResponse.json({
+        success: true,
+        file: file.toObject(),
+        version: nextVersion,
+        styleWarning,
+      });
+    } catch (err) {
+      // Roll back the orphaned upload so GridFS doesn't leak storage on failure.
+      if (uploadedId) {
+        try {
+          await bucket.delete(uploadedId);
+        } catch {
+          // Best effort cleanup only
+        }
+      }
+      throw err;
+    }
   } catch (error) {
     console.error("Excel save error:", error);
     return NextResponse.json(

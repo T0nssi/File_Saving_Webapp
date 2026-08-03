@@ -9,6 +9,7 @@ export interface FileDoc {
   description: string;
   folderId: string | null;
   uploadedBy: string;
+  currentVersion?: number;
   uploadedAt: string;
   updatedAt: string;
 }
