@@ -6,6 +6,7 @@ import RevisionModel from "@/models/Revision";
 import { requireUser } from "@/lib/session";
 import { getBucket } from "@/lib/gridfs";
 import { getColumnLetter, getCellAddress } from "@/lib/excelUtils";
+import { claimNextVersion } from "@/lib/revisionVersion";
 import { Readable } from "stream";
 import type mongoose from "mongoose";
 
@@ -431,15 +432,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
 
       // Atomically claim the next version number so concurrent saves never collide.
-      const updatedForVersion = await FileModel.findByIdAndUpdate(
-        id,
-        { $inc: { currentVersion: 1 } },
-        { new: true }
-      );
-      if (!updatedForVersion) {
-        throw new Error("File not found during version update");
-      }
-      const nextVersion = updatedForVersion.currentVersion;
+      const nextVersion = await claimNextVersion(id);
 
       // Generate detailed change summary
       let changesSummary = `Edited by ${requester.username}`;

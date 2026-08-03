@@ -4,6 +4,7 @@ import RevisionModel from "@/models/Revision";
 import FileModel from "@/models/File";
 import { requireUser } from "@/lib/session";
 import { getBucket } from "@/lib/gridfs";
+import { claimNextVersion } from "@/lib/revisionVersion";
 import { Readable } from "stream";
 import type mongoose from "mongoose";
 
@@ -63,15 +64,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
 
       // Atomically claim the next version number so restore participates in the same counter as saves.
-      const updatedForVersion = await FileModel.findByIdAndUpdate(
-        id,
-        { $inc: { currentVersion: 1 } },
-        { new: true }
-      );
-      if (!updatedForVersion) {
-        throw new Error("File not found during version update");
-      }
-      const nextVersion = updatedForVersion.currentVersion;
+      const nextVersion = await claimNextVersion(id);
 
       // Record the restore itself as a new revision so history stays linear (git-style revert).
       const oldGridFsId = file.gridFsId;
