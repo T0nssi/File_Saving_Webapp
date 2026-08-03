@@ -16,11 +16,97 @@ interface Sheet {
   data: string[][];
 }
 
+interface CellChange {
+  cell: string;
+  sheet: string;
+  oldValue: string;
+  newValue: string;
+}
+
 // Security constants
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_ROWS = 10000;
 const MAX_COLS = 500;
 const MAX_SHEETS = 50;
+
+// Compare old and new data and return list of changes
+function compareSheetData(
+  oldSheets: Sheet[],
+  newSheets: Sheet[]
+): CellChange[] {
+  const changes: CellChange[] = [];
+
+  newSheets.forEach((newSheet, sheetIdx) => {
+    const oldSheet = oldSheets[sheetIdx];
+    if (!oldSheet) return;
+
+    // Compare each cell
+    newSheet.data.forEach((row, rowIdx) => {
+      row.forEach((newValue, colIdx) => {
+        const oldValue = oldSheet.data[rowIdx]?.[colIdx] ?? "";
+
+        // Only record if value actually changed
+        if (newValue !== oldValue) {
+          // Convert column index to letter (0 = A, 1 = B, etc)
+          let colName = "";
+          let col = colIdx;
+          while (col >= 0) {
+            colName = String.fromCharCode(65 + (col % 26)) + colName;
+            col = Math.floor(col / 26) - 1;
+          }
+
+          changes.push({
+            cell: `${colName}${rowIdx + 1}`,
+            sheet: newSheet.name,
+            oldValue: oldValue,
+            newValue: newValue,
+          });
+        }
+      });
+    });
+  });
+
+  return changes;
+}
+
+// Generate human-readable summary of changes
+function generateChangesSummary(changes: CellChange[]): string {
+  if (changes.length === 0) {
+    return "No changes";
+  }
+
+  if (changes.length === 1) {
+    const c = changes[0];
+    const oldDisplay = c.oldValue ? `"${c.oldValue}"` : "(empty)";
+    const newDisplay = c.newValue ? `"${c.newValue}"` : "(empty)";
+    return `${c.sheet}!${c.cell}: ${oldDisplay} → ${newDisplay}`;
+  }
+
+  // Group by sheet
+  const bySheet: Record<string, CellChange[]> = {};
+  changes.forEach((change) => {
+    if (!bySheet[change.sheet]) {
+      bySheet[change.sheet] = [];
+    }
+    bySheet[change.sheet].push(change);
+  });
+
+  const summaryParts: string[] = [];
+  Object.entries(bySheet).forEach(([sheetName, sheetChanges]) => {
+    if (sheetChanges.length <= 3) {
+      // Show individual cells if only a few changes
+      const cells = sheetChanges
+        .map((c) => `${c.cell} (${c.oldValue || "∅"} → ${c.newValue || "∅"})`)
+        .join(", ");
+      summaryParts.push(`${sheetName}: ${cells}`);
+    } else {
+      // Show count if many changes
+      summaryParts.push(`${sheetName}: ${sheetChanges.length} cells changed`);
+    }
+  });
+
+  return summaryParts.join(" | ");
+}
 
 export async function GET(_req: NextRequest, { params }: Params) {
   try {
@@ -187,6 +273,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     // Read original file BEFORE deleting to preserve formatting and styling
     const bucket = await getBucket();
     let originalWorkbook: XLSX.WorkBook | null = null;
+    let oldSheets: Sheet[] = [];
 
     try {
       const downloadStream = bucket.openDownloadStream(file.gridFsId);
@@ -196,6 +283,48 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
       const originalBuffer = Buffer.concat(chunks);
       originalWorkbook = XLSX.read(originalBuffer, { type: "buffer" });
+
+      // Extract old sheets data for change tracking
+      if (originalWorkbook) {
+        oldSheets = originalWorkbook.SheetNames.map((sheetName) => {
+          const worksheet = originalWorkbook!.Sheets[sheetName];
+          if (!worksheet) {
+            return { name: sheetName, data: [Array(10).fill("")] };
+          }
+          let data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
+
+          // Trim trailing empty rows
+          while (data.length > 0 && data[data.length - 1]?.every(cell => !cell)) {
+            data.pop();
+          }
+
+          if (data.length === 0) {
+            return { name: sheetName, data: [Array(10).fill("")] };
+          }
+
+          // Trim trailing empty columns
+          let maxCols = Math.max(...data.map(row => row.length));
+          let actualMaxCols = 0;
+          for (let col = 0; col < maxCols; col++) {
+            const hasValue = data.some(row => row[col]);
+            if (hasValue) actualMaxCols = col + 1;
+          }
+
+          // Normalize rows
+          data = data.map(row => {
+            const normalized = [...row];
+            while (normalized.length < actualMaxCols) {
+              normalized.push("");
+            }
+            return normalized.slice(0, actualMaxCols);
+          });
+
+          return {
+            name: sheetName,
+            data: data.length ? data : [Array(10).fill("")],
+          };
+        });
+      }
     } catch (err) {
       console.warn("Could not read original file for styling preservation");
     }
@@ -299,13 +428,20 @@ export async function POST(req: NextRequest, { params }: Params) {
     const oldGridFsId = file.gridFsId;
     const oldSize = file.size;
 
+    // Generate detailed change summary
+    let changesSummary = `Edited by ${requester.username}`;
+    if (oldSheets.length > 0) {
+      const changes = compareSheetData(oldSheets, sheets);
+      changesSummary = generateChangesSummary(changes);
+    }
+
     // Create revision of old file (before update)
     const revision = new RevisionModel({
       fileId: id,
       versionNumber: nextVersion,
       gridFsId: oldGridFsId,
       changedBy: requester.username,
-      changesSummary: `Edited by ${requester.username}`,
+      changesSummary: changesSummary,
       size: oldSize,
     });
     await revision.save();
