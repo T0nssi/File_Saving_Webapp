@@ -336,18 +336,21 @@ export async function POST(req: NextRequest, { params }: Params) {
       const originalSheet = originalWorkbook?.Sheets[sheet.name];
 
       if (originalSheet) {
-        // Start with a deep copy of the original sheet to preserve ALL formatting
+        // Start with a deep copy of the entire original sheet to preserve ALL formatting
         const newWorksheet: any = {};
 
-        // Copy all non-cell properties first (merges, column widths, row heights, etc)
+        // Copy ALL cells and properties from original sheet first
         Object.keys(originalSheet).forEach((key) => {
-          // These are metadata keys that should always be copied
           if (key.startsWith("!")) {
+            // Copy metadata (merges, column widths, row heights, etc)
             newWorksheet[key] = JSON.parse(JSON.stringify(originalSheet[key]));
+          } else {
+            // Copy all cells from original (including formatting, colors, fonts, etc)
+            newWorksheet[key] = originalSheet[key];
           }
         });
 
-        // Now update cell values with new data while keeping formatting
+        // Now update ONLY the cell values with new data while keeping all original formatting
         sheet.data.forEach((row, rowIdx) => {
           row.forEach((value, colIdx) => {
             const XLSX_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -359,22 +362,26 @@ export async function POST(req: NextRequest, { params }: Params) {
             }
             const cellAddress = colName + (rowIdx + 1);
 
-            // Get original cell to preserve style
-            const originalCell = originalSheet[cellAddress];
+            // Get original cell to preserve ALL its properties (style, format, etc)
+            const originalCell = newWorksheet[cellAddress];
 
-            if (originalCell && originalCell.s) {
-              // Preserve original cell with updated value
-              newWorksheet[cellAddress] = {
-                v: value,
-                t: "s",
-                s: originalCell.s,
-              };
+            if (originalCell) {
+              // Update value but keep everything else (style, format, type, etc)
+              originalCell.v = value;
+              if (value === "") {
+                // For empty cells, remove the value but keep the style
+                delete originalCell.v;
+              } else {
+                originalCell.t = "s";
+              }
             } else {
-              // Simple cell without style
-              newWorksheet[cellAddress] = {
-                v: value,
-                t: "s",
-              };
+              // New cell without original formatting
+              if (value !== "") {
+                newWorksheet[cellAddress] = {
+                  v: value,
+                  t: "s",
+                };
+              }
             }
           });
         });
