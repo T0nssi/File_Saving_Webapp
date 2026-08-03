@@ -35,16 +35,34 @@ export async function POST(req: NextRequest, { params }: Params) {
     const bucket = await getBucket();
 
     // Read revision file
-    const downloadStream = bucket.openDownloadStream(revision.gridFsId);
-    const chunks: Buffer[] = [];
+    let buffer: Buffer;
+    try {
+      const downloadStream = bucket.openDownloadStream(revision.gridFsId);
+      const chunks: Buffer[] = [];
 
-    await new Promise<void>((resolve, reject) => {
-      downloadStream.on("data", (chunk) => chunks.push(chunk));
-      downloadStream.on("end", () => resolve());
-      downloadStream.on("error", reject);
-    });
+      await new Promise<void>((resolve, reject) => {
+        downloadStream.on("data", (chunk) => chunks.push(chunk));
+        downloadStream.on("end", () => resolve());
+        downloadStream.on("error", reject);
+      });
 
-    const buffer = Buffer.concat(chunks);
+      buffer = Buffer.concat(chunks);
+    } catch (err) {
+      const isMissing =
+        (err as { code?: string })?.code === "ENOENT" ||
+        (err instanceof Error && /FileNotFound/i.test(err.message));
+      if (isMissing) {
+        console.error(`Revision ${id}@v${versionNumber} points to missing GridFS file ${revision.gridFsId}`);
+        return NextResponse.json(
+          {
+            error:
+              "This version's saved file no longer exists in storage (it was likely lost to a previous bug) and can't be restored. Try a different version.",
+          },
+          { status: 410 }
+        );
+      }
+      throw err;
+    }
 
     // Upload restored file (before touching the current one, so a failure here leaves the file untouched)
     const uploadStream = bucket.openUploadStream(file.originalName);
