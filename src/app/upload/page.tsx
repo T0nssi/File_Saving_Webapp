@@ -4,8 +4,9 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import DropZone from "@/components/DropZone";
 import TagInput from "@/components/TagInput";
+import { PromptModal } from "@/components/Dialog";
 import { apiFetch } from "@/lib/apiFetch";
-import { CheckCircle2, AlertTriangle, Loader2 } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Loader2, FolderPlus } from "lucide-react";
 import type { TagCount, FolderDoc } from "@/types";
 
 export default function UploadPage() {
@@ -16,6 +17,8 @@ export default function UploadPage() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [folders, setFolders] = useState<FolderDoc[]>([]);
   const [folderId, setFolderId] = useState<string>("root");
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [folderError, setFolderError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<{ saved: number; rejected: { name: string; reason: string }[] } | null>(
     null
@@ -35,6 +38,40 @@ export default function UploadPage() {
       .then((data: { folders: FolderDoc[] } | null) => setFolders(data?.folders ?? []))
       .catch(() => {});
   }, []);
+
+  async function createFolder(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setFolderError(null);
+
+    // Reuse an existing top-level folder with the same name instead of creating
+    // a duplicate — new folders from this page always land at the top level
+    // (parentId: null), same as browsing straight under "root" in Search.
+    const existing = folders.find((f) => !f.parentId && f.name.toLowerCase() === trimmed.toLowerCase());
+    if (existing) {
+      setFolderId(existing._id);
+      setShowNewFolder(false);
+      return;
+    }
+
+    try {
+      const res = await apiFetch("/api/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed, parentId: null }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setFolderError(data.error ?? "Could not create folder");
+        return;
+      }
+      setFolders((prev) => [...prev, data.folder].sort((a, b) => a.name.localeCompare(b.name)));
+      setFolderId(data.folder._id);
+      setShowNewFolder(false);
+    } catch {
+      setFolderError("Network error — is the server running?");
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -91,22 +128,38 @@ export default function UploadPage() {
           <label htmlFor="folder" className="mb-1.5 block text-sm font-medium">
             โฟลเดอร์ปลายทาง
           </label>
-          <select
-            id="folder"
-            value={folderId}
-            onChange={(e) => setFolderId(e.target.value)}
-            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)]"
-          >
-            <option value="root">ยังไม่จัดหมวด (จัดเข้าโฟลเดอร์ทีหลังได้)</option>
-            {folders.map((f) => (
-              <option key={f._id} value={f._id}>
-                {f.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex gap-2">
+            <select
+              id="folder"
+              value={folderId}
+              onChange={(e) => setFolderId(e.target.value)}
+              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)]"
+            >
+              <option value="root">ยังไม่จัดหมวด (จัดเข้าโฟลเดอร์ทีหลังได้)</option>
+              {folders.map((f) => (
+                <option key={f._id} value={f._id}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => {
+                setFolderError(null);
+                setShowNewFolder(true);
+              }}
+              title="สร้างโฟลเดอร์ใหม่ (จะสร้างที่ระดับบนสุด)"
+              className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+            >
+              <FolderPlus size={16} /> ใหม่
+            </button>
+          </div>
           <p className="mt-1 text-xs text-[var(--color-muted)]">
             ยังไม่แน่ใจว่าจะเก็บที่ไหน เลือก &quot;ยังไม่จัดหมวด&quot; ไว้ก่อนได้ แล้วค่อยย้ายทีหลังจากหน้า Search
           </p>
+          {folderError && (
+            <p className="mt-1 text-xs text-[var(--color-danger)]">{folderError}</p>
+          )}
         </div>
 
         <div>
@@ -161,6 +214,15 @@ export default function UploadPage() {
           {submitting ? "Uploading…" : "Upload files"}
         </button>
       </form>
+
+      {showNewFolder && (
+        <PromptModal
+          title="ชื่อโฟลเดอร์ใหม่ (จะสร้างที่ระดับบนสุด)"
+          submitLabel="สร้าง"
+          onSubmit={createFolder}
+          onCancel={() => setShowNewFolder(false)}
+        />
+      )}
     </div>
   );
 }
