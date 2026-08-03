@@ -268,24 +268,26 @@ export async function POST(req: NextRequest, { params }: Params) {
       uploadStream.on("finish", () => resolve());
     });
 
-    // Store old file as revision before updating
+    // Get previous revision count for version numbering
     const previousRevisions = await RevisionModel.find({ fileId: id }).sort({ versionNumber: -1 }).limit(1);
     const nextVersion = (previousRevisions[0]?.versionNumber ?? 0) + 1;
 
-    // Create revision of old file (before update)
-    if (file.gridFsId) {
-      const revision = new RevisionModel({
-        fileId: id,
-        versionNumber: nextVersion,
-        gridFsId: uploadStream.id,
-        changedBy: requester.username,
-        changesSummary: `Edited by ${requester.username}`,
-        size: buffer.length,
-      });
-      await revision.save();
-    }
+    // Save current file as a revision BEFORE we update it
+    const oldGridFsId = file.gridFsId;
+    const oldSize = file.size;
 
-    // Update file record
+    // Create revision of old file (before update)
+    const revision = new RevisionModel({
+      fileId: id,
+      versionNumber: nextVersion,
+      gridFsId: oldGridFsId,
+      changedBy: requester.username,
+      changesSummary: `Edited by ${requester.username}`,
+      size: oldSize,
+    });
+    await revision.save();
+
+    // Now update file record with new content
     file.size = buffer.length;
     file.gridFsId = uploadStream.id;
     await file.save();
