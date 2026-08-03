@@ -76,7 +76,7 @@ function generateChangesSummary(changes: CellChange[]): string {
   }
 
   if (changes.length === 1) {
-    const c = changes[0];
+    const c = changes[0]!;
     const oldDisplay = c.oldValue ? `"${c.oldValue}"` : "(empty)";
     const newDisplay = c.newValue ? `"${c.newValue}"` : "(empty)";
     return `${c.sheet}!${c.cell}: ${oldDisplay} → ${newDisplay}`;
@@ -88,7 +88,7 @@ function generateChangesSummary(changes: CellChange[]): string {
     if (!bySheet[change.sheet]) {
       bySheet[change.sheet] = [];
     }
-    bySheet[change.sheet].push(change);
+    bySheet[change.sheet]!.push(change);
   });
 
   const summaryParts: string[] = [];
