@@ -148,7 +148,10 @@ mongorestore --db=file-vault ./backup/file-vault
 ## Safe coding & dependency notes
 
 - Uploads are validated against an **allowlist** of MIME types and a max
-  size (`src/lib/validation.ts`), not a denylist.
+  size (`src/lib/validation.ts`), not a denylist. The size limit (and the
+  Excel editor's own, separately-tunable limit) is controlled via
+  `MAX_FILE_SIZE_BYTES` / `MAX_EXCEL_FILE_SIZE_BYTES` in `.env.local` — see
+  `.env.example` — and takes effect on restart, no rebuild needed.
 - Filenames and tags are sanitized (stripped of path separators / unsafe
   characters) before being stored or used in headers.
 - All Mongo ids from the URL are validated as 24-char hex before any query,

@@ -1,8 +1,23 @@
-export const MAX_FILE_SIZE = Number(
-  process.env.NEXT_PUBLIC_MAX_FILE_SIZE ?? 25 * 1024 * 1024
-); // 25MB default
+// Server-only on purpose (no NEXT_PUBLIC_ prefix): that prefix bakes the
+// value into the client JS bundle at build time, so changing it would need
+// a full rebuild rather than just an env change + restart. This is only
+// ever read here, on the server, so there's no reason to expose or freeze
+// it that way. The client learns the current value at runtime from
+// GET /api/config instead (see app/api/config/route.ts).
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
-export const MAX_FILES_PER_UPLOAD = 20;
+export const MAX_FILE_SIZE = envInt("MAX_FILE_SIZE_BYTES", 25 * 1024 * 1024); // 25MB default
+// Governs the Excel editor's read/save size cap specifically. Parsing and
+// rewriting a spreadsheet in memory (via the xlsx library) costs more than
+// just storing its bytes, so this can be capped independently of the
+// general upload limit — defaults to matching it unless overridden.
+export const MAX_EXCEL_FILE_SIZE = envInt("MAX_EXCEL_FILE_SIZE_BYTES", MAX_FILE_SIZE);
+export const MAX_FILES_PER_UPLOAD = envInt("MAX_FILES_PER_UPLOAD", 20);
 export const MAX_DESCRIPTION_LENGTH = 2000;
 export const MAX_TAGS = 20;
 export const MAX_TAG_LENGTH = 40;

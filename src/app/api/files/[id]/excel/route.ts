@@ -8,6 +8,7 @@ import { canEdit, canView, ensureFileOwnersBackfilled } from "@/lib/filePermissi
 import { getBucket } from "@/lib/gridfs";
 import { getColumnLetter, getCellAddress } from "@/lib/excelUtils";
 import { claimNextVersion } from "@/lib/revisionVersion";
+import { MAX_EXCEL_FILE_SIZE } from "@/lib/validation";
 import { Readable } from "stream";
 import type mongoose from "mongoose";
 
@@ -27,8 +28,10 @@ interface CellChange {
   newValue: string;
 }
 
-// Security constants
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+// Security constants — MAX_FILE_SIZE comes from lib/validation.ts (env-configurable
+// via MAX_EXCEL_FILE_SIZE_BYTES / MAX_FILE_SIZE_BYTES) so it isn't a second,
+// disconnected cap a file could clear on upload but then be unopenable here.
+const MAX_FILE_SIZE = MAX_EXCEL_FILE_SIZE;
 const MAX_ROWS = 10000;
 const MAX_COLS = 500;
 const MAX_SHEETS = 50;

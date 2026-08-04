@@ -24,6 +24,7 @@ export default function UploadPage() {
     null
   );
   const [error, setError] = useState<string | null>(null);
+  const [config, setConfig] = useState<{ maxFileSize: number; maxFilesPerUpload: number } | null>(null);
 
   useEffect(() => {
     apiFetch("/api/tags")
@@ -36,6 +37,12 @@ export default function UploadPage() {
     apiFetch("/api/folders?flat=1")
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { folders: FolderDoc[] } | null) => setFolders(data?.folders ?? []))
+      .catch(() => {});
+    // Current server-side limits, read live so an env-var change on the
+    // server shows up here without needing a client rebuild.
+    apiFetch("/api/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { maxFileSize: number; maxFilesPerUpload: number } | null) => setConfig(data))
       .catch(() => {});
   }, []);
 
@@ -129,11 +136,25 @@ export default function UploadPage() {
       const knownFolders = [...folders];
       const dirCache = new Map<string, string | null>();
 
+      // Skip oversized files client-side instead of sending them over the wire
+      // just to have the server reject them — same limit the server enforces,
+      // read live from /api/config so it can't drift from what's actually set.
+      const preRejected: { name: string; reason: string }[] = [];
+      const uploadable = config
+        ? files.filter((f) => {
+            if (f.size > config.maxFileSize) {
+              preRejected.push({ name: f.name, reason: "exceeds max file size" });
+              return false;
+            }
+            return true;
+          })
+        : files;
+
       // Group files by their resolved destination folder — files from a plain pick/drop
       // all land in one group (baseFolderId, same as before); files carrying a relative
       // directory (from "select a folder") are grouped per auto-created subfolder.
       const groups = new Map<string, File[]>();
-      for (const f of files) {
+      for (const f of uploadable) {
         const dir = relativeDir(f);
         const targetFolderId = await resolveFolderId(dir, baseFolderId, knownFolders, dirCache);
         const key = targetFolderId ?? "root";
@@ -143,7 +164,7 @@ export default function UploadPage() {
       }
 
       let totalSaved = 0;
-      const allRejected: { name: string; reason: string }[] = [];
+      const allRejected: { name: string; reason: string }[] = [...preRejected];
       for (const [key, groupFiles] of groups) {
         const formData = new FormData();
         groupFiles.forEach((f) => formData.append("files", f));
@@ -188,7 +209,12 @@ export default function UploadPage() {
       </div>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-        <DropZone files={files} onChange={setFiles} />
+        <DropZone
+          files={files}
+          onChange={setFiles}
+          maxFileSize={config?.maxFileSize}
+          maxFilesPerUpload={config?.maxFilesPerUpload}
+        />
 
         <div>
           <label htmlFor="folder" className="mb-1.5 block text-sm font-medium">
