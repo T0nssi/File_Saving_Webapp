@@ -12,11 +12,18 @@
 // person needs to be redirected to the page they're already on.
 const AUTH_ENDPOINTS_EXCLUDED_FROM_REDIRECT = ["/api/auth/login", "/api/auth/register"];
 
+// Pages a 401 should never bounce away from — both are valid places to land
+// while logged out (login itself, and the bootstrap/admin-invite screen at
+// /register). Redirecting off either of these to "/login?from=<self>" is how
+// the two pages previously ended up in an infinite ping-pong, each hop
+// re-encoding the other's "from" param one layer deeper.
+const NO_REDIRECT_PATHNAMES = ["/login", "/register"];
+
 export async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(input, init);
 
   if (res.status === 401 && !AUTH_ENDPOINTS_EXCLUDED_FROM_REDIRECT.some((p) => input.startsWith(p))) {
-    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+    if (typeof window !== "undefined" && !NO_REDIRECT_PATHNAMES.some((p) => window.location.pathname.startsWith(p))) {
       const from = window.location.pathname + window.location.search;
       window.location.href = `/login?from=${encodeURIComponent(from)}`;
     }

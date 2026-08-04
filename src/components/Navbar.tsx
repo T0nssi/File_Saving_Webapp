@@ -23,10 +23,12 @@ export default function Navbar() {
 
   useEffect(() => {
     function checkSession() {
-      // apiFetch itself redirects to /login on a 401 (e.g. the cookie was
-      // cleared, or a session was revoked from another tab) — this just
-      // needs to update what's shown here for everything else.
-      apiFetch("/api/auth/me")
+      // Deliberately a plain fetch, not apiFetch: a 401 here just means "not
+      // logged in yet", which is expected on /register during the no-user
+      // bootstrap flow — that must not trigger apiFetch's auto-redirect to
+      // /login, or the two pages bounce each other back and forth forever
+      // (each hop re-encoding the other's "from" param into the URL).
+      fetch("/api/auth/me")
         .then((r) => (r.ok ? r.json() : { username: null, role: null }))
         .then((d: { username: string | null; role: "admin" | "member" | null }) => {
           setUsername(d.username);

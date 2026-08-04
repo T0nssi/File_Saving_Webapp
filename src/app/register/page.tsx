@@ -3,13 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { UserPlus, User, Lock, Loader2, AlertTriangle, CheckCircle2, ShieldAlert } from "lucide-react";
-
-// Same reasoning as login/page.tsx: "from" comes from the URL and is
-// attacker-controllable, so only a same-origin relative path may be used.
-function sanitizeRedirectPath(path: string): string {
-  if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) return "/";
-  return path;
-}
+import { sanitizeRedirectPath } from "@/lib/redirect";
 
 function RegisterForm() {
   const searchParams = useSearchParams();
