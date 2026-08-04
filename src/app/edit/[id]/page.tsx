@@ -1,18 +1,31 @@
 "use client";
 
-import { useEffect, useState, use } from "react";
+import { useEffect, useRef, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, Share2, FileText, FileBox } from "lucide-react";
+import {
+  ArrowLeft,
+  Save,
+  CheckCircle2,
+  AlertTriangle,
+  Share2,
+  FileText,
+  FileBox,
+  Download,
+  Copy,
+  Clock,
+  Upload,
+} from "lucide-react";
 import TagInput from "@/components/TagInput";
 import ShareDialog from "@/components/ShareDialog";
 import { apiFetch } from "@/lib/apiFetch";
 import { getFileKind } from "@/lib/fileKind";
-import type { FileDoc, TagCount } from "@/types";
+import type { FileDoc, RevisionDoc, TagCount } from "@/types";
 
 export default function EditPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
+  const replaceInputRef = useRef<HTMLInputElement>(null);
 
   const [file, setFile] = useState<FileDoc | null>(null);
   const [filename, setFilename] = useState("");
@@ -23,6 +36,14 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showShare, setShowShare] = useState(false);
+
+  const [revisions, setRevisions] = useState<RevisionDoc[]>([]);
+  const [revisionsWarning, setRevisionsWarning] = useState<string | null>(null);
+  const [showRevisions, setShowRevisions] = useState(false);
+  const [showCloneDialog, setShowCloneDialog] = useState(false);
+  const [cloneFilename, setCloneFilename] = useState("");
+  const [replacing, setReplacing] = useState(false);
+  const [imgVersion, setImgVersion] = useState(0);
 
   useEffect(() => {
     apiFetch(`/api/files/${id}`)
@@ -42,6 +63,28 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
       .then((d: { tags: TagCount[] }) => setSuggestions(d.tags.map((t) => t.tag)))
       .catch(() => {});
   }, [id]);
+
+  async function fetchRevisions() {
+    try {
+      const res = await apiFetch(`/api/files/${id}/revisions`);
+      const data = await res.json();
+      if (data.revisions) {
+        setRevisions(data.revisions);
+        setRevisionsWarning(null);
+      } else {
+        setRevisionsWarning(data.error ?? "Revision history unavailable");
+      }
+    } catch {
+      setRevisionsWarning("Revision history unavailable");
+    }
+  }
+
+  const kind = file ? getFileKind(file.mimeType, file.filename) : "other";
+
+  useEffect(() => {
+    if (kind === "image") fetchRevisions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, kind]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -68,6 +111,94 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
     }
   }
 
+  async function handleClone() {
+    if (!cloneFilename.trim()) {
+      setError("Filename cannot be empty");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/files/${id}/clone`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newFilename: cloneFilename.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Clone failed");
+      } else {
+        router.push(`/edit/${data.file._id}`);
+      }
+    } catch {
+      setError("Network error — is the server running?");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRestore(versionNumber: number) {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/files/${id}/revisions/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ versionNumber }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Restore failed");
+      } else {
+        await refetchFile();
+        setImgVersion((v) => v + 1);
+        await fetchRevisions();
+      }
+    } catch {
+      setError("Network error — is the server running?");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function refetchFile() {
+    const res = await apiFetch(`/api/files/${id}`);
+    const data: { file?: FileDoc } = await res.json();
+    if (data.file) {
+      setFile(data.file);
+      setFilename(data.file.filename);
+    }
+  }
+
+  async function handleReplaceFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const picked = e.target.files?.[0];
+    e.target.value = "";
+    if (!picked) return;
+
+    setReplacing(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append("file", picked);
+      const res = await apiFetch(`/api/files/${id}/replace`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Replace failed");
+      } else {
+        await refetchFile();
+        setImgVersion((v) => v + 1);
+        await fetchRevisions();
+      }
+    } catch {
+      setError("Network error — is the server running?");
+    } finally {
+      setReplacing(false);
+    }
+  }
+
   if (error && !file) {
     return (
       <div className="mx-auto max-w-xl text-center">
@@ -81,8 +212,8 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
 
   if (!file) return <p className="text-sm text-[var(--color-muted)]">Loading…</p>;
 
-  const kind = getFileKind(file.mimeType, file.filename);
   const readOnly = file.myAccess !== "edit";
+  const sortedRevisions = [...revisions].sort((a, b) => b.versionNumber - a.versionNumber);
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-6">
@@ -94,7 +225,8 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
         {kind === "image" ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={`/api/files/${file._id}/download`}
+            key={imgVersion}
+            src={`/api/files/${file._id}/download?v=${imgVersion}`}
             alt={file.filename}
             className="h-20 w-20 rounded-lg object-cover"
           />
@@ -130,9 +262,151 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
         </div>
       </div>
 
+      <div className="flex flex-wrap gap-2">
+        <a
+          href={`/api/files/${id}/download`}
+          download
+          className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+        >
+          <Download size={16} /> Download
+        </a>
+        <button
+          type="button"
+          onClick={() => {
+            const dot = file.filename.lastIndexOf(".");
+            const base = dot > 0 ? file.filename.slice(0, dot) : file.filename;
+            const ext = dot > 0 ? file.filename.slice(dot) : "";
+            setCloneFilename(`${base} (copy)${ext}`);
+            setShowCloneDialog(true);
+          }}
+          className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+        >
+          <Copy size={16} /> Save As
+        </button>
+        {kind === "image" && (
+          <>
+            <button
+              type="button"
+              onClick={() => setShowRevisions(!showRevisions)}
+              className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+            >
+              <Clock size={16} /> History
+            </button>
+            {!readOnly && (
+              <>
+                <input
+                  ref={replaceInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleReplaceFile}
+                />
+                <button
+                  type="button"
+                  disabled={replacing}
+                  onClick={() => replaceInputRef.current?.click()}
+                  className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50 disabled:opacity-60"
+                >
+                  <Upload size={16} /> {replacing ? "Uploading…" : "Replace image"}
+                </button>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
       {readOnly && (
         <div className="flex items-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-700">
           <AlertTriangle size={16} /> You only have view access to this file — changes can't be saved.
+        </div>
+      )}
+
+      {showCloneDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
+          <div className="w-96 rounded-lg border border-[var(--color-border)] bg-white p-6 shadow-lg">
+            <h2 className="mb-4 text-lg font-semibold">Save File As</h2>
+            <input
+              type="text"
+              value={cloneFilename}
+              onChange={(e) => setCloneFilename(e.target.value)}
+              placeholder="New filename"
+              className="mb-4 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)]"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleClone();
+                if (e.key === "Escape") setShowCloneDialog(false);
+              }}
+              autoFocus
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={handleClone}
+                disabled={saving}
+                className="flex-1 rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
+              >
+                {saving ? "Creating..." : "Create Copy"}
+              </button>
+              <button
+                onClick={() => setShowCloneDialog(false)}
+                className="flex-1 rounded-md border border-[var(--color-border)] px-4 py-2 text-sm font-medium hover:bg-zinc-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRevisions && kind === "image" && (
+        <div className="rounded-lg border border-[var(--color-border)] bg-zinc-50 p-4">
+          <h2 className="mb-3 font-semibold">Revision History</h2>
+          {revisionsWarning && (
+            <div className="mb-3 flex items-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              <AlertTriangle size={14} /> {revisionsWarning}
+            </div>
+          )}
+          {sortedRevisions.length === 0 ? (
+            <p className="text-sm text-[var(--color-muted)]">No revisions yet</p>
+          ) : (
+            <div className="space-y-2">
+              {sortedRevisions.map((rev) => {
+                const unavailable = rev.fileAvailable === false;
+                return (
+                  <div
+                    key={rev._id}
+                    className={`flex items-start justify-between rounded-md bg-white px-3 py-2 text-sm ${unavailable ? "opacity-60" : ""}`}
+                  >
+                    <div className="flex-1">
+                      <p className="font-medium">
+                        Version {rev.versionNumber}
+                        {unavailable && (
+                          <span className="ml-2 text-xs font-normal text-[var(--color-danger)]">
+                            unavailable — file data lost
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-xs text-[var(--color-muted)]">
+                        {rev.changedBy} · {new Date(rev.createdAt).toLocaleString()}
+                      </p>
+                      {rev.changesSummary && (
+                        <p className="mt-1 text-xs text-[var(--color-text)]">{rev.changesSummary}</p>
+                      )}
+                    </div>
+                    <span className="ml-2 shrink-0 text-xs text-[var(--color-muted)]">{(rev.size / 1024).toFixed(1)} KB</span>
+                    {!readOnly && (
+                      <button
+                        onClick={() => handleRestore(rev.versionNumber)}
+                        disabled={saving || unavailable}
+                        title={unavailable ? "This version's file data no longer exists and can't be restored" : undefined}
+                        className="ml-2 shrink-0 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-blue-50 disabled:opacity-50 disabled:hover:bg-transparent"
+                      >
+                        Restore
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
