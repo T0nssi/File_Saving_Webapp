@@ -243,6 +243,11 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
           <p className="text-sm text-[var(--color-muted)]">
             {(file.size / 1024).toFixed(1)} KB · Last modified {new Date(file.updatedAt).toLocaleString()}
           </p>
+          {file.lastAccessedBy && file.lastAccessedAt && (
+            <p className="text-xs text-[var(--color-muted)]">
+              Last opened by {file.lastAccessedBy} on {new Date(file.lastAccessedAt).toLocaleString()}
+            </p>
+          )}
           {file.sourceFileId && (
             <p className="mt-1 text-xs text-[var(--color-muted)]">
               Cloned from{" "}

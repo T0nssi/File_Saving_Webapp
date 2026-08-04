@@ -114,6 +114,11 @@ export default function FileCard({ file, folders, onDelete, onPreview, onMove }:
             </span>
           )}
         </div>
+        {file.lastAccessedBy && file.lastAccessedAt && (
+          <p className="text-[10px] text-[var(--color-muted)]">
+            Last opened by {file.lastAccessedBy} on {new Date(file.lastAccessedAt).toLocaleDateString()}
+          </p>
+        )}
 
         <div className="flex items-center gap-1.5">
           <FolderInput size={12} className="shrink-0 text-[var(--color-muted)]" />

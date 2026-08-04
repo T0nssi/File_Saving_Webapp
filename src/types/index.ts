@@ -22,6 +22,8 @@ export interface FileDoc {
   sourceFileId?: string | null;
   ownerId?: string | null;
   sharedWith?: FileShareEntry[];
+  lastAccessedBy?: string | null;
+  lastAccessedAt?: string | null;
   // Present when the API scoped this response to the requester's own access —
   // neither field is stored on the document itself. "edit" also covers
   // ownership/admin; canManageSharing is stricter (owner or admin only).

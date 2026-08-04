@@ -352,7 +352,7 @@ function SearchPageInner() {
                   return (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={`/api/files/${preview._id}/download`}
+                      src={`/api/files/${preview._id}/download?view=1`}
                       alt={preview.filename}
                       className="max-h-[60vh] max-w-full object-contain"
                     />
@@ -361,7 +361,7 @@ function SearchPageInner() {
                 if (kind === "pdf") {
                   return (
                     <iframe
-                      src={`/api/files/${preview._id}/download`}
+                      src={`/api/files/${preview._id}/download?view=1`}
                       title={preview.filename}
                       className="h-[70vh] w-full rounded border-0 bg-white"
                     />

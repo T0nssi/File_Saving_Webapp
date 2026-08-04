@@ -249,6 +249,11 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
             <p className="text-sm text-[var(--color-muted)]">
               {(file.size / 1024).toFixed(1)} KB · uploaded {new Date(file.uploadedAt).toLocaleString()}
             </p>
+            {file.lastAccessedBy && file.lastAccessedAt && (
+              <p className="text-xs text-[var(--color-muted)]">
+                Last opened by {file.lastAccessedBy} on {new Date(file.lastAccessedAt).toLocaleString()}
+              </p>
+            )}
           </div>
           {file.canManageSharing && (
             <button

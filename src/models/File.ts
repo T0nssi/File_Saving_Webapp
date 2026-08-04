@@ -27,6 +27,10 @@ export interface IFile {
   // Explicit per-user grants beyond the owner. Admins always have full access
   // regardless of this list.
   sharedWith: IFileShare[];
+  // Updated whenever someone genuinely opens the file (edit/excel page, preview
+  // modal, or an explicit download) — not on incidental thumbnail loads.
+  lastAccessedBy: string | null;
+  lastAccessedAt: Date | null;
   uploadedAt: Date;
   updatedAt: Date;
 }
@@ -59,6 +63,8 @@ const FileSchema = new Schema<IFile>(
     sourceFileId: { type: Schema.Types.ObjectId, ref: "File", default: null, index: true },
     ownerId: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
     sharedWith: { type: [FileShareSchema], default: [] },
+    lastAccessedBy: { type: String, default: null, trim: true, maxlength: 40 },
+    lastAccessedAt: { type: Date, default: null },
   },
   {
     timestamps: { createdAt: "uploadedAt", updatedAt: "updatedAt" },

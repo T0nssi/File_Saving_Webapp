@@ -6,6 +6,7 @@ import { logEvent } from "@/lib/logger";
 import { requireUser } from "@/lib/session";
 import { canEdit, canView, ensureFileOwnersBackfilled, getFileAccess, isOwnerOrAdmin } from "@/lib/filePermissions";
 import { deleteFileCompletely } from "@/lib/fileDeletion";
+import { recordFileAccess } from "@/lib/fileAccessLog";
 import {
   isValidObjectId,
   parseTags,
@@ -33,9 +34,13 @@ export async function GET(req: NextRequest, { params }: Params) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  recordFileAccess(id, requester.username);
+
   return NextResponse.json({
     file: {
       ...doc,
+      lastAccessedBy: requester.username,
+      lastAccessedAt: new Date(),
       myAccess: getFileAccess(doc, requester),
       canManageSharing: isOwnerOrAdmin(doc, requester),
     },

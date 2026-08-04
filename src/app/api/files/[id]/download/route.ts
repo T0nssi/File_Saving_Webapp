@@ -7,6 +7,7 @@ import { requireUser } from "@/lib/session";
 import { canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { isValidObjectId } from "@/lib/validation";
 import { logEvent } from "@/lib/logger";
+import { recordFileAccess } from "@/lib/fileAccessLog";
 
 export const runtime = "nodejs";
 
@@ -35,8 +36,14 @@ export async function GET(req: NextRequest, { params }: Params) {
     const nodeStream = bucket.openDownloadStream(doc.gridFsId);
     const webStream = Readable.toWeb(nodeStream) as ReadableStream;
 
-    const disposition =
-      new URL(req.url).searchParams.get("download") === "1" ? "attachment" : "inline";
+    const searchParams = new URL(req.url).searchParams;
+    const disposition = searchParams.get("download") === "1" ? "attachment" : "inline";
+
+    // Thumbnail grid loads hit this same route on every render — only count it
+    // as a genuine "open" when the caller flags an explicit view/download.
+    if (searchParams.get("download") === "1" || searchParams.get("view") === "1") {
+      recordFileAccess(id, requester.username);
+    }
 
     return new NextResponse(webStream, {
       headers: {
