@@ -167,10 +167,16 @@ export default function UploadPage() {
       const allRejected: { name: string; reason: string }[] = [...preRejected];
       for (const [key, groupFiles] of groups) {
         const formData = new FormData();
-        groupFiles.forEach((f) => formData.append("files", f));
+        // Metadata fields first, files last: the server now streams this
+        // multipart body straight into GridFS as it arrives (see
+        // api/upload/route.ts) rather than buffering it, so it needs tags/
+        // description/folderId parsed before it starts processing file
+        // parts — otherwise a file could finish streaming before the
+        // server even knows which folder it belongs in.
         formData.append("tags", tags.join(","));
         formData.append("description", description);
         if (key !== "root") formData.append("folderId", key);
+        groupFiles.forEach((f) => formData.append("files", f));
 
         const res = await apiFetch("/api/upload", { method: "POST", body: formData });
         const data = await res.json();
