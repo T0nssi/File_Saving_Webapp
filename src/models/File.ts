@@ -11,6 +11,7 @@ export interface IFile {
   folderId: mongoose.Types.ObjectId | null;
   uploadedBy: string;
   currentVersion: number;
+  sourceFileId: mongoose.Types.ObjectId | null;
   uploadedAt: Date;
   updatedAt: Date;
 }
@@ -29,6 +30,9 @@ const FileSchema = new Schema<IFile>(
     uploadedBy: { type: String, default: "", trim: true, maxlength: 40 },
     // Monotonically incremented via atomic $inc on each Excel save; source of truth for revision versionNumber.
     currentVersion: { type: Number, default: 0 },
+    // Set only on files created via Save As / clone — the file this one was cloned from,
+    // so the UI can show "cloned from <master>" and link back to it.
+    sourceFileId: { type: Schema.Types.ObjectId, ref: "File", default: null, index: true },
   },
   {
     timestamps: { createdAt: "uploadedAt", updatedAt: "updatedAt" },

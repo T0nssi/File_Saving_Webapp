@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FileText, Trash2, Pencil, Eye, FolderInput, Sheet } from "lucide-react";
+import { FileText, Trash2, Pencil, Eye, FolderInput, Sheet, Copy } from "lucide-react";
 import { formatBytes } from "@/lib/format";
 import type { FileDoc, FolderDoc } from "@/types";
 
@@ -47,8 +47,11 @@ export default function FileCard({ file, folders, onDelete, onPreview, onMove }:
       </button>
 
       <div className="flex flex-1 flex-col gap-2 p-3">
-        <p className="truncate text-sm font-medium" title={file.filename}>
-          {file.filename}
+        <p className="flex items-center gap-1 truncate text-sm font-medium" title={file.filename}>
+          {file.sourceFileId && (
+            <Copy size={11} className="shrink-0 text-[var(--color-muted)]" aria-label="Cloned file" />
+          )}
+          <span className="truncate">{file.filename}</span>
         </p>
         {file.description && (
           <p className="line-clamp-2 text-xs text-[var(--color-muted)]">{file.description}</p>

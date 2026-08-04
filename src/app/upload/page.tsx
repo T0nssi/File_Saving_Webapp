@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import DropZone from "@/components/DropZone";
+import DropZone, { relativeDir } from "@/components/DropZone";
 import TagInput from "@/components/TagInput";
 import { PromptModal } from "@/components/Dialog";
 import { apiFetch } from "@/lib/apiFetch";
@@ -73,6 +73,47 @@ export default function UploadPage() {
     }
   }
 
+  // Auto-creates (or reuses) the folder chain for a relative directory path picked
+  // via "select a folder", e.g. "Invoices/2026" under whatever destination folder is
+  // currently selected — mirroring the picked folder's structure instead of dumping
+  // every file flat into one place. `known` is extended in place as folders are
+  // created, so files sharing a prefix within the same submit reuse the same lookup.
+  async function resolveFolderId(
+    dir: string,
+    baseFolderId: string | null,
+    known: FolderDoc[],
+    cache: Map<string, string | null>
+  ): Promise<string | null> {
+    if (!dir) return baseFolderId;
+    if (cache.has(dir)) return cache.get(dir)!;
+
+    const idx = dir.lastIndexOf("/");
+    const parentDir = idx === -1 ? "" : dir.slice(0, idx);
+    const name = idx === -1 ? dir : dir.slice(idx + 1);
+    const parentId = await resolveFolderId(parentDir, baseFolderId, known, cache);
+
+    const existing = known.find(
+      (f) => (f.parentId ?? null) === parentId && f.name.toLowerCase() === name.toLowerCase()
+    );
+    if (existing) {
+      cache.set(dir, existing._id);
+      return existing._id;
+    }
+
+    const res = await apiFetch("/api/folders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, parentId }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error ?? `Could not create folder "${name}"`);
+    }
+    known.push(data.folder);
+    cache.set(dir, data.folder._id);
+    return data.folder._id;
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (files.length === 0) {
@@ -84,29 +125,54 @@ export default function UploadPage() {
     setSubmitting(true);
 
     try {
-      const formData = new FormData();
-      files.forEach((f) => formData.append("files", f));
-      formData.append("tags", tags.join(","));
-      formData.append("description", description);
-      if (folderId !== "root") formData.append("folderId", folderId);
+      const baseFolderId = folderId === "root" ? null : folderId;
+      const knownFolders = [...folders];
+      const dirCache = new Map<string, string | null>();
 
-      const res = await apiFetch("/api/upload", { method: "POST", body: formData });
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(data.error ?? "Upload failed");
-      } else {
-        setResult({ saved: data.saved.length, rejected: data.rejected });
-        setFiles([]);
-        setTags([]);
-        setDescription("");
-        if (data.saved.length > 0) {
-          const dest = folderId !== "root" ? `/search?folderId=${folderId}` : "/search?folderId=root";
-          setTimeout(() => router.push(dest), 1200);
-        }
+      // Group files by their resolved destination folder — files from a plain pick/drop
+      // all land in one group (baseFolderId, same as before); files carrying a relative
+      // directory (from "select a folder") are grouped per auto-created subfolder.
+      const groups = new Map<string, File[]>();
+      for (const f of files) {
+        const dir = relativeDir(f);
+        const targetFolderId = await resolveFolderId(dir, baseFolderId, knownFolders, dirCache);
+        const key = targetFolderId ?? "root";
+        const group = groups.get(key);
+        if (group) group.push(f);
+        else groups.set(key, [f]);
       }
-    } catch {
-      setError("Network error — is the server running?");
+
+      let totalSaved = 0;
+      const allRejected: { name: string; reason: string }[] = [];
+      for (const [key, groupFiles] of groups) {
+        const formData = new FormData();
+        groupFiles.forEach((f) => formData.append("files", f));
+        formData.append("tags", tags.join(","));
+        formData.append("description", description);
+        if (key !== "root") formData.append("folderId", key);
+
+        const res = await apiFetch("/api/upload", { method: "POST", body: formData });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error ?? "Upload failed");
+          setSubmitting(false);
+          return;
+        }
+        totalSaved += data.saved.length;
+        allRejected.push(...data.rejected);
+      }
+
+      setFolders(knownFolders.sort((a, b) => a.name.localeCompare(b.name)));
+      setResult({ saved: totalSaved, rejected: allRejected });
+      setFiles([]);
+      setTags([]);
+      setDescription("");
+      if (totalSaved > 0) {
+        const dest = folderId !== "root" ? `/search?folderId=${folderId}` : "/search?folderId=root";
+        setTimeout(() => router.push(dest), 1200);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error — is the server running?");
     } finally {
       setSubmitting(false);
     }

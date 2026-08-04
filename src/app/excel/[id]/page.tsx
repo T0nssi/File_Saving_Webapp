@@ -18,6 +18,7 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
   const router = useRouter();
 
   const [file, setFile] = useState<FileDoc | null>(null);
+  const [masterFile, setMasterFile] = useState<FileDoc | null>(null);
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [revisions, setRevisions] = useState<RevisionDoc[]>([]);
   const [saving, setSaving] = useState(false);
@@ -92,6 +93,25 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
       cancelled = true;
     };
   }, [id]);
+
+  useEffect(() => {
+    if (!file?.sourceFileId) {
+      setMasterFile(null);
+      return;
+    }
+    let cancelled = false;
+    apiFetch(`/api/files/${file.sourceFileId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { file: FileDoc } | null) => {
+        if (!cancelled) setMasterFile(data?.file ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setMasterFile(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file?.sourceFileId]);
 
   async function fetchRevisions() {
     try {
@@ -221,6 +241,18 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
           <p className="text-sm text-[var(--color-muted)]">
             {(file.size / 1024).toFixed(1)} KB · Last modified {new Date(file.updatedAt).toLocaleString()}
           </p>
+          {file.sourceFileId && (
+            <p className="mt-1 text-xs text-[var(--color-muted)]">
+              Cloned from{" "}
+              {masterFile ? (
+                <Link href={`/excel/${masterFile._id}`} className="text-[var(--color-accent)] hover:underline">
+                  {masterFile.filename}
+                </Link>
+              ) : (
+                "a master file that no longer exists"
+              )}
+            </p>
+          )}
         </div>
 
         <div className="flex gap-2">

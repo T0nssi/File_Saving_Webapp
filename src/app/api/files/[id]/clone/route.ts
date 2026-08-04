@@ -56,7 +56,9 @@ export async function POST(req: NextRequest, { params }: Params) {
         throw new Error("Upload did not return a valid file ID");
       }
 
-      // Create new file record
+      // Create new file record. If sourceFile is itself a clone, point at its
+      // master rather than chaining — "master" should always resolve in one hop.
+      const masterFileId = sourceFile.sourceFileId ?? sourceFile._id;
       const newFile = new FileModel({
         filename: newFilename,
         originalName: newFilename,
@@ -67,6 +69,7 @@ export async function POST(req: NextRequest, { params }: Params) {
         description: `Copy of ${sourceFile.filename}`,
         folderId: sourceFile.folderId,
         uploadedBy: requester.username,
+        sourceFileId: masterFileId,
       });
 
       await newFile.save();

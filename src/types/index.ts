@@ -10,6 +10,8 @@ export interface FileDoc {
   folderId: string | null;
   uploadedBy: string;
   currentVersion?: number;
+  // Set only on files created via Save As / clone — the master file this one was cloned from.
+  sourceFileId?: string | null;
   uploadedAt: string;
   updatedAt: string;
 }

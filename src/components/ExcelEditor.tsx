@@ -18,9 +18,18 @@ interface ExcelEditorProps {
 
 const MAX_HISTORY = 50;
 const DEFAULT_COL_WIDTH = 100;
+const DEFAULT_ROW_HEIGHT = 36;
+const DEFAULT_TABLE_HEIGHT = 480;
+const MIN_TABLE_HEIGHT = 160;
 
 function columnWidthsStorageKey(fileId: string) {
   return `excel-editor:col-widths:${fileId}`;
+}
+function rowHeightsStorageKey(fileId: string) {
+  return `excel-editor:row-heights:${fileId}`;
+}
+function tableHeightStorageKey(fileId: string) {
+  return `excel-editor:table-height:${fileId}`;
 }
 
 export default function ExcelEditor({ fileId, filename, onSave, initialSheets, saving }: ExcelEditorProps) {
@@ -31,8 +40,11 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   const [editingSheetName, setEditingSheetName] = useState<number | null>(null);
   const [sheetNameError, setSheetNameError] = useState<string | null>(null);
   const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
+  const [rowHeights, setRowHeights] = useState<Record<number, number>>({});
+  const [tableHeight, setTableHeight] = useState(DEFAULT_TABLE_HEIGHT);
   const menuRef = useRef<HTMLDivElement>(null);
   const activeResizeCleanup = useRef<(() => void) | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const currentSheet = sheets[activeSheet] ?? { name: "", data: [] };
 
@@ -43,12 +55,17 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     });
   }, []);
 
-  // Load persisted column widths for this file
+  // Load persisted column widths, row heights, and table height for this file
   useEffect(() => {
     try {
-      const raw = window.localStorage.getItem(columnWidthsStorageKey(fileId));
-      if (raw) {
-        setColumnWidths(JSON.parse(raw));
+      const rawCols = window.localStorage.getItem(columnWidthsStorageKey(fileId));
+      if (rawCols) setColumnWidths(JSON.parse(rawCols));
+      const rawRows = window.localStorage.getItem(rowHeightsStorageKey(fileId));
+      if (rawRows) setRowHeights(JSON.parse(rawRows));
+      const rawHeight = window.localStorage.getItem(tableHeightStorageKey(fileId));
+      if (rawHeight) {
+        const parsed = Number(rawHeight);
+        if (Number.isFinite(parsed) && parsed >= MIN_TABLE_HEIGHT) setTableHeight(parsed);
       }
     } catch {
       // Ignore malformed/unavailable storage
@@ -65,12 +82,32 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Clean up any in-flight column-resize listeners if the component unmounts mid-drag
+  // Clean up any in-flight column/row-resize listeners if the component unmounts mid-drag
   useEffect(() => {
     return () => {
       activeResizeCleanup.current?.();
     };
   }, []);
+
+  // The table container's height is user-resizable via native CSS `resize: vertical`
+  // (drag the bottom-right corner). Persist that size per file so it survives reloads.
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const height = Math.round(entry.contentRect.height);
+      if (height < MIN_TABLE_HEIGHT) return;
+      try {
+        window.localStorage.setItem(tableHeightStorageKey(fileId), String(height));
+      } catch {
+        // Ignore storage failures (quota, privacy mode, etc.)
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [fileId]);
 
   const handleCellChange = (row: number, col: number, value: string) => {
     const newSheets = sheets.map((s, idx) =>
@@ -204,7 +241,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     pushHistory(newSheets);
   };
 
-  const handleMouseDown = (e: React.MouseEvent, colIdx: number) => {
+  const handleColResizeMouseDown = (e: React.MouseEvent, colIdx: number) => {
     const startX = e.clientX;
     const startWidth = columnWidths[colIdx] || DEFAULT_COL_WIDTH;
 
@@ -215,6 +252,40 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
         const next = { ...prev, [colIdx]: newWidth };
         try {
           window.localStorage.setItem(columnWidthsStorageKey(fileId), JSON.stringify(next));
+        } catch {
+          // Ignore storage failures (quota, privacy mode, etc.)
+        }
+        return next;
+      });
+    };
+
+    const cleanup = () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+      activeResizeCleanup.current = null;
+    };
+
+    const handleMouseUp = () => {
+      cleanup();
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    activeResizeCleanup.current = cleanup;
+    e.preventDefault();
+  };
+
+  const handleRowResizeMouseDown = (e: React.MouseEvent, rowIdx: number) => {
+    const startY = e.clientY;
+    const startHeight = rowHeights[rowIdx] || DEFAULT_ROW_HEIGHT;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientY - startY;
+      const newHeight = Math.max(20, startHeight + delta);
+      setRowHeights(prev => {
+        const next = { ...prev, [rowIdx]: newHeight };
+        try {
+          window.localStorage.setItem(rowHeightsStorageKey(fileId), JSON.stringify(next));
         } catch {
           // Ignore storage failures (quota, privacy mode, etc.)
         }
@@ -359,11 +430,15 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
         </div>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border border-[var(--color-border)]">
+      <div
+        ref={scrollContainerRef}
+        style={{ height: `${tableHeight}px`, minHeight: `${MIN_TABLE_HEIGHT}px` }}
+        className="resize-y overflow-auto rounded-lg border border-[var(--color-border)]"
+      >
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="border-b border-[var(--color-border)] bg-zinc-50">
-              <th className="w-12 border-r border-[var(--color-border)] bg-zinc-100 px-2 py-2 text-center text-xs font-semibold text-[var(--color-muted)]">
+              <th className="sticky left-0 top-0 z-20 w-12 border-r border-b border-[var(--color-border)] bg-zinc-100 px-2 py-2 text-center text-xs font-semibold text-[var(--color-muted)]">
                 #
               </th>
               {currentSheet.data[0]?.map((_, colIdx) => (
@@ -373,12 +448,12 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                     width: columnWidths[colIdx] ? `${columnWidths[colIdx]}px` : "auto",
                     minWidth: "80px",
                   }}
-                  className="relative border-r border-[var(--color-border)] bg-zinc-100 px-3 py-2 text-center text-xs font-semibold text-[var(--color-muted)] select-none"
+                  className="sticky top-0 z-10 relative border-r border-b border-[var(--color-border)] bg-zinc-100 px-3 py-2 text-center text-xs font-semibold text-[var(--color-muted)] select-none"
                 >
                   {getColumnHeader(colIdx)}
                   {/* Resize handle */}
                   <div
-                    onMouseDown={(e) => handleMouseDown(e, colIdx)}
+                    onMouseDown={(e) => handleColResizeMouseDown(e, colIdx)}
                     className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-[var(--color-accent)] hover:w-2 transition-all"
                     title="Drag to resize column"
                     style={{
@@ -392,9 +467,23 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
           </thead>
           <tbody>
             {currentSheet.data.map((row, rowIdx) => (
-              <tr key={rowIdx} className="border-b border-[var(--color-border)] hover:bg-zinc-50">
-                <td className="border-r border-[var(--color-border)] bg-zinc-50 px-2 py-2 text-center text-xs font-medium text-[var(--color-muted)]">
+              <tr
+                key={rowIdx}
+                style={rowHeights[rowIdx] ? { height: `${rowHeights[rowIdx]}px` } : undefined}
+                className="border-b border-[var(--color-border)] hover:bg-zinc-50"
+              >
+                <td className="sticky left-0 z-[1] relative border-r border-[var(--color-border)] bg-zinc-50 px-2 py-2 text-center text-xs font-medium text-[var(--color-muted)]">
                   {rowIdx + 1}
+                  {/* Row resize handle */}
+                  <div
+                    onMouseDown={(e) => handleRowResizeMouseDown(e, rowIdx)}
+                    className="absolute bottom-0 left-0 h-1.5 w-full cursor-row-resize hover:bg-[var(--color-accent)] hover:h-2 transition-all"
+                    title="Drag to resize row"
+                    style={{
+                      backgroundColor: "transparent",
+                      transition: "background-color 200ms, height 200ms",
+                    }}
+                  />
                 </td>
                 {row.map((cell, colIdx) => (
                   <td
@@ -421,7 +510,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
       </div>
 
       <div className="text-xs text-[var(--color-muted)]">
-        {currentSheet.data.length} rows × {currentSheet.data[0]?.length ?? 0} columns
+        {currentSheet.data.length} rows × {currentSheet.data[0]?.length ?? 0} columns · drag the bottom-right corner to resize the table
       </div>
     </div>
   );
