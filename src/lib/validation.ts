@@ -39,7 +39,32 @@ export const ALLOWED_MIME_TYPES = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/zip",
   "application/json",
+  // CAD formats — included here for completeness, but browsers rarely know
+  // these extensions and typically report "" or application/octet-stream
+  // instead of any of these, so isAllowedUpload() below also accepts them
+  // by extension when the MIME type is one of those generic fallbacks.
+  "image/vnd.dwg",
+  "application/acad",
+  "application/x-dwg",
+  "image/vnd.dxf",
+  "application/dxf",
+  "model/step",
+  "application/step",
+  "application/x-step",
 ];
+
+// Extensions with genuinely unreliable browser MIME detection — used only as
+// a fallback when the reported type is empty or the generic octet-stream,
+// never to override an explicit, different (and therefore suspicious) type.
+const CAD_EXTENSIONS = [".dwg", ".dxf", ".step", ".stp"];
+const UNRELIABLE_MIME_TYPES = ["", "application/octet-stream"];
+
+export function isAllowedUpload(mimeType: string, filename: string): boolean {
+  if (ALLOWED_MIME_TYPES.includes(mimeType)) return true;
+  if (!UNRELIABLE_MIME_TYPES.includes(mimeType)) return false;
+  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+  return CAD_EXTENSIONS.includes(ext);
+}
 
 /** Strips path separators and unsafe characters; keeps extension intact. */
 export function sanitizeFilename(name: string): string {

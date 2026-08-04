@@ -3,10 +3,11 @@
 import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, Share2 } from "lucide-react";
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, Share2, FileText, FileBox } from "lucide-react";
 import TagInput from "@/components/TagInput";
 import ShareDialog from "@/components/ShareDialog";
 import { apiFetch } from "@/lib/apiFetch";
+import { getFileKind } from "@/lib/fileKind";
 import type { FileDoc, TagCount } from "@/types";
 
 export default function EditPage({ params }: { params: Promise<{ id: string }> }) {
@@ -80,7 +81,7 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
 
   if (!file) return <p className="text-sm text-[var(--color-muted)]">Loading…</p>;
 
-  const isImage = file.mimeType.startsWith("image/");
+  const kind = getFileKind(file.mimeType, file.filename);
   const readOnly = file.myAccess !== "edit";
 
   return (
@@ -90,13 +91,21 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
       </Link>
 
       <div className="flex items-center gap-4">
-        {isImage ? (
+        {kind === "image" ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={`/api/files/${file._id}/download`}
             alt={file.filename}
             className="h-20 w-20 rounded-lg object-cover"
           />
+        ) : kind === "pdf" ? (
+          <div className="flex h-20 w-20 items-center justify-center rounded-lg bg-red-50">
+            <FileText size={28} className="text-red-500" />
+          </div>
+        ) : kind === "cad" ? (
+          <div className="flex h-20 w-20 items-center justify-center rounded-lg bg-amber-50">
+            <FileBox size={28} className="text-amber-600" />
+          </div>
         ) : (
           <div className="flex h-20 w-20 items-center justify-center rounded-lg bg-zinc-100 text-xs text-[var(--color-muted)]">
             {file.mimeType.split("/")[1]?.toUpperCase() ?? "FILE"}

@@ -46,8 +46,17 @@ export interface FolderDoc {
   parentId: string | null;
   fileCount?: number;
   childFolderCount?: number;
+  // Totals across the whole subtree (every nested folder/file), not just
+  // direct children — only present on non-flat GET /api/folders responses.
+  fileCountRecursive?: number;
+  folderCountRecursive?: number;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface VaultTotals {
+  folderCount: number;
+  fileCount: number;
 }
 
 export type LogLevel = "info" | "warn" | "error";

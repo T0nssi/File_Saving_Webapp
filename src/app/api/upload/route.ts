@@ -7,7 +7,7 @@ import FileModel from "@/models/File";
 import { logEvent } from "@/lib/logger";
 import { requireUser, CurrentUser } from "@/lib/session";
 import {
-  ALLOWED_MIME_TYPES,
+  isAllowedUpload,
   MAX_FILE_SIZE,
   MAX_FILES_PER_UPLOAD,
   isValidObjectId,
@@ -68,7 +68,7 @@ function parseUpload(
     bb.on("file", (_fieldname, fileStream, info) => {
       const { filename, mimeType } = info;
 
-      if (!ALLOWED_MIME_TYPES.includes(mimeType)) {
+      if (!isAllowedUpload(mimeType, filename)) {
         rejected.push({ name: filename, reason: `type "${mimeType}" not allowed` });
         fileStream.resume(); // drain without storing
         return;

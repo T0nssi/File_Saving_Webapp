@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
   const levelIds = levelFolders.map((f) => f._id);
   const access = accessFilter(requester);
 
-  const [fileCounts, folderCounts, rootCount] = await Promise.all([
+  const [fileCounts, folderCounts, recursiveCounts, rootCount, vaultTotals] = await Promise.all([
     FileModel.aggregate([
       { $match: { $and: [{ folderId: { $in: levelIds } }, access] } },
       { $group: { _id: "$folderId", count: { $sum: 1 } } },
@@ -55,21 +55,76 @@ export async function GET(req: NextRequest) {
       { $match: { parentId: { $in: levelIds } } },
       { $group: { _id: "$parentId", count: { $sum: 1 } } },
     ]),
+    // Recursive totals per folder at this level — every nested subfolder and
+    // file underneath it, not just direct children — so the tree reads like
+    // a VS Code explorer badge ("N folders · M files") instead of only
+    // counting what's one level down.
+    levelIds.length > 0
+      ? FolderModel.aggregate([
+          { $match: { _id: { $in: levelIds } } },
+          {
+            $graphLookup: {
+              from: "folders",
+              startWith: "$_id",
+              connectFromField: "_id",
+              connectToField: "parentId",
+              as: "descendants",
+            },
+          },
+          {
+            $project: {
+              allIds: { $concatArrays: [["$_id"], "$descendants._id"] },
+              folderCountRecursive: { $size: "$descendants" },
+            },
+          },
+          {
+            $lookup: {
+              from: "files",
+              let: { ids: "$allIds" },
+              pipeline: [{ $match: { $expr: { $in: ["$folderId", "$$ids"] }, ...access } }, { $count: "count" }],
+              as: "fileCountResult",
+            },
+          },
+          {
+            $project: {
+              folderCountRecursive: 1,
+              fileCountRecursive: { $ifNull: [{ $arrayElemAt: ["$fileCountResult.count", 0] }, 0] },
+            },
+          },
+        ])
+      : Promise.resolve([]),
     parentId === null
       ? FileModel.countDocuments({ $and: [{ folderId: null }, access] })
+      : Promise.resolve(undefined),
+    // Vault-wide totals, shown on the "All files" root node — folders are a
+    // shared namespace so the count is unscoped, but files are access-scoped
+    // like everywhere else.
+    parentId === null
+      ? Promise.all([FolderModel.countDocuments({}), FileModel.countDocuments(access)])
       : Promise.resolve(undefined),
   ]);
 
   const fileCountMap = new Map<string, number>(fileCounts.map((c) => [String(c._id), c.count as number]));
   const folderCountMap = new Map<string, number>(folderCounts.map((c) => [String(c._id), c.count as number]));
+  const recursiveMap = new Map<string, { fileCountRecursive: number; folderCountRecursive: number }>(
+    recursiveCounts.map((c) => [
+      String(c._id),
+      { fileCountRecursive: c.fileCountRecursive as number, folderCountRecursive: c.folderCountRecursive as number },
+    ])
+  );
 
   return NextResponse.json({
     folders: levelFolders.map((f) => ({
       ...f,
       fileCount: fileCountMap.get(String(f._id)) ?? 0,
       childFolderCount: folderCountMap.get(String(f._id)) ?? 0,
+      fileCountRecursive: recursiveMap.get(String(f._id))?.fileCountRecursive ?? 0,
+      folderCountRecursive: recursiveMap.get(String(f._id))?.folderCountRecursive ?? 0,
     })),
     ...(parentId === null ? { rootCount } : {}),
+    ...(parentId === null && vaultTotals
+      ? { vaultTotals: { folderCount: vaultTotals[0], fileCount: vaultTotals[1] } }
+      : {}),
   });
 }
 
