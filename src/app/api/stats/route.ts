@@ -1,7 +1,9 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import mongoose from "mongoose";
 import { dbConnect } from "@/lib/mongodb";
 import FileModel from "@/models/File";
+import { requireUser } from "@/lib/session";
+import { accessFilter, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 
 interface CollStats {
   size?: number;
@@ -22,41 +24,54 @@ const CACHE_TTL_MS = 60_000;
 // view. Note: on a multi-instance/serverless deployment each instance keeps
 // its own cache, so this smooths out repeat hits rather than guaranteeing a
 // single global refresh.
-let cached: { payload: StatsPayload; expiresAt: number } | null = null;
+//
+// Only cached for admins: it's the one case where the numbers are global
+// (every file, not scoped to one requester), so a single cached payload is
+// valid for every admin that asks. A member's numbers are scoped to what
+// they can see, which differs per requester, so those are computed live.
+let cachedAdminPayload: { payload: StatsPayload; expiresAt: number } | null = null;
 
-export async function GET() {
-  if (cached && cached.expiresAt > Date.now()) {
-    return NextResponse.json(cached.payload);
+export async function GET(req: NextRequest) {
+  const requester = await requireUser(req);
+  if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  if (requester.role === "admin" && cachedAdminPayload && cachedAdminPayload.expiresAt > Date.now()) {
+    return NextResponse.json(cachedAdminPayload.payload);
   }
 
   await dbConnect();
+  await ensureFileOwnersBackfilled();
 
+  const filter = accessFilter(requester);
   const [agg, fileCount] = await Promise.all([
-    FileModel.aggregate([{ $group: { _id: null, totalBytes: { $sum: "$size" } } }]),
-    FileModel.countDocuments(),
+    FileModel.aggregate([{ $match: filter }, { $group: { _id: null, totalBytes: { $sum: "$size" } } }]),
+    FileModel.countDocuments(filter),
   ]);
   const logicalBytes = agg[0]?.totalBytes ?? 0;
 
-  // Best-effort: the actual bytes GridFS occupies on disk (file content
-  // lives in the "chunks" collection, metadata in "files") — this can be
-  // larger than the logical sum above due to chunk padding/overhead, and
-  // isn't available on every MongoDB deployment/permission level, so this
-  // is optional extra detail, not the primary number.
+  // Best-effort: the actual bytes GridFS occupies on disk. This is a
+  // collection-wide figure that can't be scoped to one requester's files, so
+  // it's only meaningful (and only fetched) for an admin looking at the
+  // whole vault.
   let mongoStorageBytes: number | null = null;
-  try {
-    const db = mongoose.connection.db;
-    if (db) {
-      const [filesStats, chunksStats] = await Promise.all([
-        db.command({ collStats: "uploads.files" }) as Promise<CollStats>,
-        db.command({ collStats: "uploads.chunks" }) as Promise<CollStats>,
-      ]);
-      mongoStorageBytes = (filesStats.storageSize ?? filesStats.size ?? 0) + (chunksStats.storageSize ?? chunksStats.size ?? 0);
+  if (requester.role === "admin") {
+    try {
+      const db = mongoose.connection.db;
+      if (db) {
+        const [filesStats, chunksStats] = await Promise.all([
+          db.command({ collStats: "uploads.files" }) as Promise<CollStats>,
+          db.command({ collStats: "uploads.chunks" }) as Promise<CollStats>,
+        ]);
+        mongoStorageBytes = (filesStats.storageSize ?? filesStats.size ?? 0) + (chunksStats.storageSize ?? chunksStats.size ?? 0);
+      }
+    } catch {
+      mongoStorageBytes = null;
     }
-  } catch {
-    mongoStorageBytes = null;
   }
 
   const payload: StatsPayload = { fileCount, logicalBytes, mongoStorageBytes };
-  cached = { payload, expiresAt: Date.now() + CACHE_TTL_MS };
+  if (requester.role === "admin") {
+    cachedAdminPayload = { payload, expiresAt: Date.now() + CACHE_TTL_MS };
+  }
   return NextResponse.json(payload);
 }

@@ -5,6 +5,7 @@ import FileModel from "@/models/File";
 import RevisionModel from "@/models/Revision";
 import { logEvent } from "@/lib/logger";
 import { requireUser } from "@/lib/session";
+import { canEdit, canView, ensureFileOwnersBackfilled, getFileAccess, isOwnerOrAdmin } from "@/lib/filePermissions";
 import {
   isValidObjectId,
   parseTags,
@@ -16,17 +17,29 @@ interface Params {
   params: Promise<{ id: string }>;
 }
 
-export async function GET(_req: NextRequest, { params }: Params) {
+export async function GET(req: NextRequest, { params }: Params) {
+  const requester = await requireUser(req);
+  if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   const { id } = await params;
   if (!isValidObjectId(id)) {
     return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   }
 
   await dbConnect();
+  await ensureFileOwnersBackfilled();
   const doc = await FileModel.findById(id).lean();
-  if (!doc) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!doc || !canView(doc, requester)) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
-  return NextResponse.json({ file: doc });
+  return NextResponse.json({
+    file: {
+      ...doc,
+      myAccess: getFileAccess(doc, requester),
+      canManageSharing: isOwnerOrAdmin(doc, requester),
+    },
+  });
 }
 
 export async function PUT(req: NextRequest, { params }: Params) {
@@ -40,8 +53,14 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
   try {
     await dbConnect();
+    await ensureFileOwnersBackfilled();
     const doc = await FileModel.findById(id);
-    if (!doc) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!doc || !canView(doc, requester)) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (!canEdit(doc, requester)) {
+      return NextResponse.json({ error: "You don't have edit access to this file" }, { status: 403 });
+    }
 
     const body = await req.json();
     const before = {
@@ -107,8 +126,14 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
 
   try {
     await dbConnect();
+    await ensureFileOwnersBackfilled();
     const doc = await FileModel.findById(id);
-    if (!doc) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!doc || !canView(doc, requester)) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (!isOwnerOrAdmin(doc, requester)) {
+      return NextResponse.json({ error: "Only the owner or an admin can delete this file" }, { status: 403 });
+    }
 
     const bucket = await getBucket();
     try {

@@ -3,6 +3,8 @@ import { Readable } from "stream";
 import { dbConnect } from "@/lib/mongodb";
 import { getBucket } from "@/lib/gridfs";
 import FileModel from "@/models/File";
+import { requireUser } from "@/lib/session";
+import { canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { isValidObjectId } from "@/lib/validation";
 import { logEvent } from "@/lib/logger";
 
@@ -13,14 +15,20 @@ interface Params {
 }
 
 export async function GET(req: NextRequest, { params }: Params) {
+  const requester = await requireUser(req);
+  if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   const { id } = await params;
   if (!isValidObjectId(id)) {
     return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   }
 
   await dbConnect();
+  await ensureFileOwnersBackfilled();
   const doc = await FileModel.findById(id).lean();
-  if (!doc) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!doc || !canView(doc, requester)) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   try {
     const bucket = await getBucket();

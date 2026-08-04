@@ -44,6 +44,14 @@ function SearchPageInner() {
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<FileDoc | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    apiFetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { role: string | null } | null) => setIsAdmin(d?.role === "admin"))
+      .catch(() => {});
+  }, []);
 
   function updateUrl(next: { q?: string; tag?: string; folderId?: string | null; page?: number }) {
     const params = new URLSearchParams(searchParams.toString());
@@ -215,6 +223,7 @@ function SearchPageInner() {
             onDropFile={handleMove}
             refreshKey={foldersRefreshKey}
             onChanged={() => setFoldersRefreshKey((k) => k + 1)}
+            canDelete={isAdmin}
           />
           <StoragePanel refreshKey={foldersRefreshKey} />
         </div>

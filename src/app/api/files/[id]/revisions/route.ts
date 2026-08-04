@@ -3,18 +3,24 @@ import { dbConnect } from "@/lib/mongodb";
 import RevisionModel from "@/models/Revision";
 import FileModel from "@/models/File";
 import { getBucket } from "@/lib/gridfs";
+import { requireUser } from "@/lib/session";
+import { canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 
 interface Params {
   params: Promise<{ id: string }>;
 }
 
-export async function GET(_req: NextRequest, { params }: Params) {
+export async function GET(req: NextRequest, { params }: Params) {
   try {
+    const requester = await requireUser(req);
+    if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
     const { id } = await params;
     await dbConnect();
+    await ensureFileOwnersBackfilled();
 
     const file = await FileModel.findById(id);
-    if (!file) {
+    if (!file || !canView(file, requester)) {
       return NextResponse.json({ error: "File not found" }, { status: 404 });
     }
 

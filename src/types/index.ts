@@ -1,3 +1,11 @@
+export type SharePermission = "view" | "edit";
+
+export interface FileShareEntry {
+  userId: string;
+  permission: SharePermission;
+  sharedAt: string;
+}
+
 export interface FileDoc {
   _id: string;
   filename: string;
@@ -12,8 +20,24 @@ export interface FileDoc {
   currentVersion?: number;
   // Set only on files created via Save As / clone — the master file this one was cloned from.
   sourceFileId?: string | null;
+  ownerId?: string | null;
+  sharedWith?: FileShareEntry[];
+  // Present when the API scoped this response to the requester's own access —
+  // neither field is stored on the document itself. "edit" also covers
+  // ownership/admin; canManageSharing is stricter (owner or admin only).
+  myAccess?: SharePermission | null;
+  canManageSharing?: boolean;
   uploadedAt: string;
   updatedAt: string;
+}
+
+// Response shape for GET/POST /api/files/[id]/shares (resolved to usernames,
+// distinct from the raw userId-only FileShareEntry stored on the document).
+export interface ResolvedShare {
+  userId: string;
+  username: string;
+  permission: SharePermission;
+  sharedAt: string;
 }
 
 export interface FolderDoc {

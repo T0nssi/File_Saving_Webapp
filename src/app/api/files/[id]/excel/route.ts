@@ -4,6 +4,7 @@ import { dbConnect } from "@/lib/mongodb";
 import FileModel from "@/models/File";
 import RevisionModel from "@/models/Revision";
 import { requireUser } from "@/lib/session";
+import { canEdit, canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { getBucket } from "@/lib/gridfs";
 import { getColumnLetter, getCellAddress } from "@/lib/excelUtils";
 import { claimNextVersion } from "@/lib/revisionVersion";
@@ -103,13 +104,20 @@ function generateChangesSummary(changes: CellChange[]): string {
   return summaryParts.join(" | ");
 }
 
-export async function GET(_req: NextRequest, { params }: Params) {
+export async function GET(req: NextRequest, { params }: Params) {
   try {
+    const requester = await requireUser(req);
+    if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
     const { id } = await params;
     await dbConnect();
+    await ensureFileOwnersBackfilled();
 
     const file = await FileModel.findById(id);
     if (!file || (!file.mimeType.includes("spreadsheet") && !file.mimeType.includes("excel"))) {
+      return NextResponse.json({ error: "File not found or not an Excel file" }, { status: 404 });
+    }
+    if (!canView(file, requester)) {
       return NextResponse.json({ error: "File not found or not an Excel file" }, { status: 404 });
     }
 
@@ -265,10 +273,14 @@ export async function POST(req: NextRequest, { params }: Params) {
     }
 
     await dbConnect();
+    await ensureFileOwnersBackfilled();
 
     const file = await FileModel.findById(id);
-    if (!file) {
+    if (!file || !canView(file, requester)) {
       return NextResponse.json({ error: "File not found" }, { status: 404 });
+    }
+    if (!canEdit(file, requester)) {
+      return NextResponse.json({ error: "You don't have edit access to this file" }, { status: 403 });
     }
 
     const isExcel = file.mimeType.includes("spreadsheet") || file.mimeType.includes("excel");

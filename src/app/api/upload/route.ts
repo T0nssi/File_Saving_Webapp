@@ -79,6 +79,7 @@ export async function POST(req: NextRequest) {
         description,
         folderId,
         uploadedBy,
+        ownerId: requester.id,
       });
 
       await logEvent({

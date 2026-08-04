@@ -3,6 +3,8 @@ import { Readable } from "stream";
 import { dbConnect } from "@/lib/mongodb";
 import FileModel from "@/models/File";
 import { logEvent } from "@/lib/logger";
+import { requireUser } from "@/lib/session";
+import { accessFilter, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { isValidObjectId, sanitizeTag } from "@/lib/validation";
 import { buildTextFilter } from "@/lib/search";
 import type { FilterQuery } from "mongoose";
@@ -19,7 +21,11 @@ const CSV_HEADER = ["filename", "originalName", "mimeType", "size", "tags", "des
 
 export async function GET(req: NextRequest) {
   try {
+    const requester = await requireUser(req);
+    if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
     await dbConnect();
+    await ensureFileOwnersBackfilled();
     const { searchParams } = new URL(req.url);
 
     const q = searchParams.get("q")?.trim().slice(0, 200) ?? "";
@@ -29,7 +35,10 @@ export async function GET(req: NextRequest) {
 
     const filter: FilterQuery<IFile> = {};
     const textFilters = q ? buildTextFilter(q) : [];
-    if (textFilters.length > 0) filter.$and = textFilters;
+    const access = accessFilter(requester);
+    const andClauses: FilterQuery<IFile>[] = [...textFilters];
+    if (Object.keys(access).length > 0) andClauses.push(access);
+    if (andClauses.length > 0) filter.$and = andClauses;
     if (tag) filter.tags = tag;
     if (folderId === "root") filter.folderId = null;
     else if (folderId && isValidObjectId(folderId)) filter.folderId = folderId;

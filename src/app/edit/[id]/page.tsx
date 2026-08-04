@@ -3,8 +3,9 @@
 import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle } from "lucide-react";
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, Share2 } from "lucide-react";
 import TagInput from "@/components/TagInput";
+import ShareDialog from "@/components/ShareDialog";
 import { apiFetch } from "@/lib/apiFetch";
 import type { FileDoc, TagCount } from "@/types";
 
@@ -20,6 +21,7 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showShare, setShowShare] = useState(false);
 
   useEffect(() => {
     apiFetch(`/api/files/${id}`)
@@ -79,6 +81,7 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
   if (!file) return <p className="text-sm text-[var(--color-muted)]">Loading…</p>;
 
   const isImage = file.mimeType.startsWith("image/");
+  const readOnly = file.myAccess !== "edit";
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-6">
@@ -99,13 +102,30 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
             {file.mimeType.split("/")[1]?.toUpperCase() ?? "FILE"}
           </div>
         )}
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">Edit file</h1>
-          <p className="text-sm text-[var(--color-muted)]">
-            {(file.size / 1024).toFixed(1)} KB · uploaded {new Date(file.uploadedAt).toLocaleString()}
-          </p>
+        <div className="flex flex-1 items-start justify-between">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">Edit file</h1>
+            <p className="text-sm text-[var(--color-muted)]">
+              {(file.size / 1024).toFixed(1)} KB · uploaded {new Date(file.uploadedAt).toLocaleString()}
+            </p>
+          </div>
+          {file.canManageSharing && (
+            <button
+              type="button"
+              onClick={() => setShowShare(true)}
+              className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+            >
+              <Share2 size={16} /> Share
+            </button>
+          )}
         </div>
       </div>
+
+      {readOnly && (
+        <div className="flex items-center gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-700">
+          <AlertTriangle size={16} /> You only have view access to this file — changes can't be saved.
+        </div>
+      )}
 
       <form onSubmit={handleSave} className="flex flex-col gap-5">
         <div>
@@ -113,13 +133,14 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
           <input
             value={filename}
             onChange={(e) => setFilename(e.target.value)}
-            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)]"
+            readOnly={readOnly}
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)] read-only:bg-zinc-50"
           />
         </div>
 
         <div>
           <label className="mb-1.5 block text-sm font-medium">Tags</label>
-          <TagInput tags={tags} onChange={setTags} suggestions={suggestions} />
+          <TagInput tags={tags} onChange={readOnly ? () => {} : setTags} suggestions={suggestions} />
         </div>
 
         <div>
@@ -127,9 +148,10 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
+            readOnly={readOnly}
             rows={4}
             maxLength={2000}
-            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)]"
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)] read-only:bg-zinc-50"
           />
         </div>
 
@@ -145,22 +167,28 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
         )}
 
         <div className="flex gap-3">
-          <button
-            type="submit"
-            disabled={saving}
-            className="flex items-center gap-2 rounded-md bg-[var(--color-accent)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
-          >
-            <Save size={16} /> {saving ? "Saving…" : "Save changes"}
-          </button>
+          {!readOnly && (
+            <button
+              type="submit"
+              disabled={saving}
+              className="flex items-center gap-2 rounded-md bg-[var(--color-accent)] px-4 py-2.5 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
+            >
+              <Save size={16} /> {saving ? "Saving…" : "Save changes"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => router.push("/search")}
             className="rounded-md border border-[var(--color-border)] px-4 py-2.5 text-sm font-medium hover:bg-zinc-50"
           >
-            Cancel
+            {readOnly ? "Back" : "Cancel"}
           </button>
         </div>
       </form>
+
+      {showShare && (
+        <ShareDialog fileId={id} filename={file.filename} onClose={() => setShowShare(false)} />
+      )}
     </div>
   );
 }

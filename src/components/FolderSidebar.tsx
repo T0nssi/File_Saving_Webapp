@@ -14,6 +14,10 @@ interface Props {
   onDropFile: (fileId: string, folderId: string | null) => void;
   refreshKey?: number;
   onChanged?: () => void;
+  // Folder deletion cascades to reparent every file inside it, including
+  // ones the current user can't see — the API restricts it to admins, so
+  // the delete button only renders for them to avoid a surprise 403.
+  canDelete?: boolean;
 }
 
 type PromptState =
@@ -26,7 +30,7 @@ const ROOT_KEY = "root";
  * Expanding a folder fetches (and caches) its children the first time —
  * a wide or deep vault never has to load every folder just to open the
  * sidebar. */
-export default function FolderSidebar({ activeFolderId, onSelect, onDropFile, refreshKey, onChanged }: Props) {
+export default function FolderSidebar({ activeFolderId, onSelect, onDropFile, refreshKey, onChanged, canDelete = false }: Props) {
   const [levelCache, setLevelCache] = useState<Record<string, FolderDoc[]>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loadingLevels, setLoadingLevels] = useState<Record<string, boolean>>({});
@@ -181,14 +185,16 @@ export default function FolderSidebar({ activeFolderId, onSelect, onDropFile, re
           >
             <Pencil size={12} />
           </button>
-          <button
-            type="button"
-            aria-label={`Delete ${f.name}`}
-            onClick={() => setDeleteTarget({ id: f._id, name: f.name })}
-            className="hidden shrink-0 rounded p-1 text-[var(--color-muted)] hover:bg-red-50 hover:text-[var(--color-danger)] group-hover:block"
-          >
-            <Trash2 size={12} />
-          </button>
+          {canDelete && (
+            <button
+              type="button"
+              aria-label={`Delete ${f.name}`}
+              onClick={() => setDeleteTarget({ id: f._id, name: f.name })}
+              className="hidden shrink-0 rounded p-1 text-[var(--color-muted)] hover:bg-red-50 hover:text-[var(--color-danger)] group-hover:block"
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
         </div>
         {isExpanded && (
           <>

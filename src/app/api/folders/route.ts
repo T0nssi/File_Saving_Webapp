@@ -5,14 +5,23 @@ import FileModel from "@/models/File";
 import { logEvent } from "@/lib/logger";
 import { isValidObjectId, sanitizeFolderName } from "@/lib/validation";
 import { requireUser } from "@/lib/session";
+import { accessFilter, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 
 // Level-by-level, not the whole tree at once: the sidebar loads the root
 // level up front, then fetches a folder's children only when it's expanded
 // (?parentId=<id>), and each fetch's file/subfolder counts are scoped to
 // just that level's folder ids — so a deep or wide vault doesn't mean
 // scanning (or shipping to the client) every folder just to open the page.
+//
+// The folder tree itself is a shared namespace (not owned/private) — only
+// the per-folder file counts are scoped to what the requester can access,
+// so a member never sees a count that includes files they can't open.
 export async function GET(req: NextRequest) {
+  const requester = await requireUser(req);
+  if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   await dbConnect();
+  await ensureFileOwnersBackfilled();
   const { searchParams } = new URL(req.url);
 
   if (searchParams.get("flat") === "1") {
@@ -35,17 +44,20 @@ export async function GET(req: NextRequest) {
 
   const levelFolders = await FolderModel.find({ parentId }).sort({ name: 1 }).lean();
   const levelIds = levelFolders.map((f) => f._id);
+  const access = accessFilter(requester);
 
   const [fileCounts, folderCounts, rootCount] = await Promise.all([
     FileModel.aggregate([
-      { $match: { folderId: { $in: levelIds } } },
+      { $match: { $and: [{ folderId: { $in: levelIds } }, access] } },
       { $group: { _id: "$folderId", count: { $sum: 1 } } },
     ]),
     FolderModel.aggregate([
       { $match: { parentId: { $in: levelIds } } },
       { $group: { _id: "$parentId", count: { $sum: 1 } } },
     ]),
-    parentId === null ? FileModel.countDocuments({ folderId: null }) : Promise.resolve(undefined),
+    parentId === null
+      ? FileModel.countDocuments({ $and: [{ folderId: null }, access] })
+      : Promise.resolve(undefined),
   ]);
 
   const fileCountMap = new Map<string, number>(fileCounts.map((c) => [String(c._id), c.count as number]));

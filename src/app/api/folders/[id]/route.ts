@@ -47,6 +47,14 @@ export async function PUT(req: NextRequest, { params }: Params) {
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const requester = await requireUser(_req);
   if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // The folder tree is a shared namespace anyone can create/rename in, but
+  // deleting one reparents *every* file inside it in one shot — including
+  // files the requester may not own, have been shared, or can even see.
+  // Without this, a member could relocate someone else's private file just
+  // by deleting the folder it happens to sit in. Restricted to admins.
+  if (requester.role !== "admin") {
+    return NextResponse.json({ error: "Only an admin can delete a folder" }, { status: 403 });
+  }
 
   const { id } = await params;
   if (!isValidObjectId(id)) {

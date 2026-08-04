@@ -1,8 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
-import { FileText, Trash2, Pencil, Eye, FolderInput, Sheet, Copy } from "lucide-react";
+import { FileText, Trash2, Pencil, Eye, FolderInput, Sheet, Copy, Share2, Users } from "lucide-react";
 import { formatBytes } from "@/lib/format";
+import ShareDialog from "@/components/ShareDialog";
 import type { FileDoc, FolderDoc } from "@/types";
 
 interface Props {
@@ -14,17 +16,24 @@ interface Props {
 }
 
 export default function FileCard({ file, folders, onDelete, onPreview, onMove }: Props) {
+  const [showShare, setShowShare] = useState(false);
   const isImage = file.mimeType.startsWith("image/");
   const isExcel = file.mimeType.includes("spreadsheet") || file.mimeType.includes("excel") || file.filename.endsWith(".xlsx") || file.filename.endsWith(".xls");
 
+  // Defaults are display-only guards (hide/disable buttons); the server enforces
+  // the real permission on every mutating request regardless of what's shown here.
+  const canEdit = file.myAccess === "edit";
+  const canManageSharing = file.canManageSharing ?? false;
+  const isSharedWithMe = file.myAccess === "view";
+
   return (
     <div
-      draggable
+      draggable={canEdit}
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", file._id);
         e.dataTransfer.effectAllowed = "move";
       }}
-      className="group flex cursor-grab flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] active:cursor-grabbing"
+      className={`group flex flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] ${canEdit ? "cursor-grab active:cursor-grabbing" : ""}`}
     >
       <button
         type="button"
@@ -65,17 +74,25 @@ export default function FileCard({ file, folders, onDelete, onPreview, onMove }:
             ))}
           </div>
         )}
-        {file.uploadedBy && (
-          <p className="text-[10px] text-[var(--color-muted)]">อัพโหลดโดย {file.uploadedBy}</p>
-        )}
+        <div className="flex items-center gap-2">
+          {file.uploadedBy && (
+            <p className="text-[10px] text-[var(--color-muted)]">อัพโหลดโดย {file.uploadedBy}</p>
+          )}
+          {isSharedWithMe && (
+            <span className="flex items-center gap-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+              <Users size={9} /> Shared with you
+            </span>
+          )}
+        </div>
 
         <div className="flex items-center gap-1.5">
           <FolderInput size={12} className="shrink-0 text-[var(--color-muted)]" />
           <select
             aria-label={`Move ${file.filename} to folder`}
             value={file.folderId ?? "root"}
+            disabled={!canEdit}
             onChange={(e) => onMove(file._id, e.target.value === "root" ? null : e.target.value)}
-            className="w-full truncate rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-[11px] outline-none focus-visible:border-[var(--color-accent)]"
+            className="w-full truncate rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-[11px] outline-none focus-visible:border-[var(--color-accent)] disabled:opacity-50"
           >
             <option value="root">ยังไม่จัดหมวด</option>
             {folders.map((f) => (
@@ -99,7 +116,17 @@ export default function FileCard({ file, folders, onDelete, onPreview, onMove }:
             >
               <Eye size={14} />
             </button>
-            {isExcel ? (
+            {canManageSharing && (
+              <button
+                type="button"
+                aria-label={`Share ${file.filename}`}
+                onClick={() => setShowShare(true)}
+                className="rounded p-1.5 text-[var(--color-muted)] hover:bg-zinc-100 hover:text-[var(--color-accent)]"
+              >
+                <Share2 size={14} />
+              </button>
+            )}
+            {canEdit && (isExcel ? (
               <Link
                 href={`/excel/${file._id}`}
                 aria-label={`Edit Excel ${file.filename}`}
@@ -115,18 +142,24 @@ export default function FileCard({ file, folders, onDelete, onPreview, onMove }:
               >
                 <Pencil size={14} />
               </Link>
+            ))}
+            {canManageSharing && (
+              <button
+                type="button"
+                aria-label={`Delete ${file.filename}`}
+                onClick={() => onDelete(file._id)}
+                className="rounded p-1.5 text-[var(--color-muted)] hover:bg-red-50 hover:text-[var(--color-danger)]"
+              >
+                <Trash2 size={14} />
+              </button>
             )}
-            <button
-              type="button"
-              aria-label={`Delete ${file.filename}`}
-              onClick={() => onDelete(file._id)}
-              className="rounded p-1.5 text-[var(--color-muted)] hover:bg-red-50 hover:text-[var(--color-danger)]"
-            >
-              <Trash2 size={14} />
-            </button>
           </div>
         </div>
       </div>
+
+      {showShare && (
+        <ShareDialog fileId={file._id} filename={file.filename} onClose={() => setShowShare(false)} />
+      )}
     </div>
   );
 }

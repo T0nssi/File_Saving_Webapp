@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { dbConnect } from "@/lib/mongodb";
 import FileModel from "@/models/File";
 import { requireUser } from "@/lib/session";
+import { canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { getBucket } from "@/lib/gridfs";
 import { Readable } from "stream";
 import type mongoose from "mongoose";
@@ -23,9 +24,12 @@ export async function POST(req: NextRequest, { params }: Params) {
     }
 
     await dbConnect();
+    await ensureFileOwnersBackfilled();
 
     const sourceFile = await FileModel.findById(id);
-    if (!sourceFile) {
+    if (!sourceFile || !canView(sourceFile, requester)) {
+      // Same response whether the file is missing or just inaccessible —
+      // don't reveal that a file a requester can't see exists at all.
       return NextResponse.json({ error: "File not found" }, { status: 404 });
     }
 
@@ -69,6 +73,7 @@ export async function POST(req: NextRequest, { params }: Params) {
         description: `Copy of ${sourceFile.filename}`,
         folderId: sourceFile.folderId,
         uploadedBy: requester.username,
+        ownerId: requester.id,
         sourceFileId: masterFileId,
       });
 

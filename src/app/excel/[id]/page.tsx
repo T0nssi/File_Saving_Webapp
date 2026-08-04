@@ -3,8 +3,9 @@
 import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, AlertTriangle, CheckCircle2, Clock, Download, Copy } from "lucide-react";
+import { ArrowLeft, AlertTriangle, CheckCircle2, Clock, Download, Copy, Share2 } from "lucide-react";
 import ExcelEditor from "@/components/ExcelEditor";
+import ShareDialog from "@/components/ShareDialog";
 import { apiFetch } from "@/lib/apiFetch";
 import type { FileDoc, RevisionDoc } from "@/types";
 
@@ -29,6 +30,7 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
   const [showRevisions, setShowRevisions] = useState(false);
   const [showCloneDialog, setShowCloneDialog] = useState(false);
   const [cloneFilename, setCloneFilename] = useState("");
+  const [showShare, setShowShare] = useState(false);
   const [loading, setLoading] = useState(true);
   // Bumped whenever `sheets` is replaced from the server (initial load, restore) so
   // ExcelEditor remounts and picks up the new data instead of keeping its stale internal state.
@@ -278,6 +280,14 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
           >
             <Clock size={16} /> History
           </button>
+          {file.canManageSharing && (
+            <button
+              onClick={() => setShowShare(true)}
+              className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+            >
+              <Share2 size={16} /> Share
+            </button>
+          )}
         </div>
       </div>
 
@@ -387,7 +397,12 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
           initialSheets={sheets}
           onSave={handleSave}
           saving={saving}
+          readOnly={file.myAccess !== "edit"}
         />
+      )}
+
+      {showShare && (
+        <ShareDialog fileId={id} filename={file.filename} onClose={() => setShowShare(false)} />
       )}
     </div>
   );

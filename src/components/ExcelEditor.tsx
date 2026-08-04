@@ -14,6 +14,10 @@ interface ExcelEditorProps {
   onSave: (sheets: Sheet[]) => Promise<boolean>;
   initialSheets: Sheet[];
   saving: boolean;
+  // True when the viewer only has "view" share access — the server rejects
+  // the save request either way, but disabling editing here avoids letting
+  // someone type changes for several minutes before finding that out.
+  readOnly?: boolean;
 }
 
 const MAX_HISTORY = 50;
@@ -32,7 +36,7 @@ function tableHeightStorageKey(fileId: string) {
   return `excel-editor:table-height:${fileId}`;
 }
 
-export default function ExcelEditor({ fileId, filename, onSave, initialSheets, saving }: ExcelEditorProps) {
+export default function ExcelEditor({ fileId, filename, onSave, initialSheets, saving, readOnly = false }: ExcelEditorProps) {
   const [sheets, setSheets] = useState<Sheet[]>(initialSheets);
   const [activeSheet, setActiveSheet] = useState(0);
   const [history, setHistory] = useState<Sheet[][]>([initialSheets]);
@@ -110,6 +114,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   }, [fileId]);
 
   const handleCellChange = (row: number, col: number, value: string) => {
+    if (readOnly) return;
     const newSheets = sheets.map((s, idx) =>
       idx === activeSheet
         ? {
@@ -164,14 +169,14 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   };
 
   const handleSave = useCallback(async () => {
-    if (saving) return;
+    if (saving || readOnly) return;
     const success = await onSave(sheets);
     if (success) {
       // Collapse history back to a single baseline so the dirty check and undo
       // button both reflect "nothing to lose" right after a successful save.
       setHistory([sheets]);
     }
-  }, [onSave, sheets, saving]);
+  }, [onSave, sheets, saving, readOnly]);
 
   // Ctrl+S / Cmd+S saves instead of triggering the browser's save-page dialog
   useEffect(() => {
@@ -351,12 +356,12 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                 ) : (
                   <button
                     onClick={() => setActiveSheet(idx)}
-                    onDoubleClick={() => setEditingSheetName(idx)}
+                    onDoubleClick={() => !readOnly && setEditingSheetName(idx)}
                     className="flex items-center gap-1 px-3 py-2 text-sm font-medium"
-                    title="Double-click to rename"
+                    title={readOnly ? undefined : "Double-click to rename"}
                   >
                     {sheet.name}
-                    {activeSheet === idx && <Edit2 size={12} className="opacity-50" />}
+                    {activeSheet === idx && !readOnly && <Edit2 size={12} className="opacity-50" />}
                   </button>
                 )}
               </div>
@@ -368,65 +373,77 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={undo}
-            disabled={history.length <= 1}
-            className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50 disabled:opacity-50"
-            title="Undo (Ctrl+Z)"
-          >
-            <RotateCcw size={16} />
-          </button>
+          {readOnly && (
+            <span className="rounded-md bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+              View only
+            </span>
+          )}
 
-          <div className="relative" ref={menuRef}>
+          {!readOnly && (
             <button
-              onClick={() => setShowMenu(!showMenu)}
-              className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+              onClick={undo}
+              disabled={history.length <= 1}
+              className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50 disabled:opacity-50"
+              title="Undo (Ctrl+Z)"
             >
-              <MoreVertical size={16} />
+              <RotateCcw size={16} />
             </button>
+          )}
 
-            {showMenu && (
-              <div className="absolute right-0 z-10 mt-1 w-40 rounded-md border border-[var(--color-border)] bg-white shadow-lg">
-                <button
-                  onClick={() => {
-                    addRow();
-                    setShowMenu(false);
-                  }}
-                  className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
-                >
-                  Add row
-                </button>
-                <button
-                  onClick={() => {
-                    addColumn();
-                    setShowMenu(false);
-                  }}
-                  className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
-                >
-                  Add column
-                </button>
-                <div className="border-t border-[var(--color-border)]" />
-                <button
-                  onClick={() => {
-                    cloneSheet();
-                    setShowMenu(false);
-                  }}
-                  className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm hover:bg-zinc-50"
-                >
-                  <Copy size={14} /> Clone sheet
-                </button>
-              </div>
-            )}
-          </div>
+          {!readOnly && (
+            <div className="relative" ref={menuRef}>
+              <button
+                onClick={() => setShowMenu(!showMenu)}
+                className="rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+              >
+                <MoreVertical size={16} />
+              </button>
 
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="flex items-center gap-2 rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
-            title="Save (Ctrl+S)"
-          >
-            <Save size={16} /> {saving ? "Saving..." : "Save"}
-          </button>
+              {showMenu && (
+                <div className="absolute right-0 z-10 mt-1 w-40 rounded-md border border-[var(--color-border)] bg-white shadow-lg">
+                  <button
+                    onClick={() => {
+                      addRow();
+                      setShowMenu(false);
+                    }}
+                    className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                  >
+                    Add row
+                  </button>
+                  <button
+                    onClick={() => {
+                      addColumn();
+                      setShowMenu(false);
+                    }}
+                    className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                  >
+                    Add column
+                  </button>
+                  <div className="border-t border-[var(--color-border)]" />
+                  <button
+                    onClick={() => {
+                      cloneSheet();
+                      setShowMenu(false);
+                    }}
+                    className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                  >
+                    <Copy size={14} /> Clone sheet
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {!readOnly && (
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="flex items-center gap-2 rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
+              title="Save (Ctrl+S)"
+            >
+              <Save size={16} /> {saving ? "Saving..." : "Save"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -498,8 +515,9 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                       type="text"
                       value={cell ?? ""}
                       onChange={(e) => handleCellChange(rowIdx, colIdx, e.target.value)}
+                      readOnly={readOnly}
                       placeholder={(cell === "" || cell === null) ? "empty" : undefined}
-                      className="w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 focus:border-[var(--color-accent)] focus:bg-white focus:ring-1 focus:ring-offset-0"
+                      className={`w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 ${readOnly ? "cursor-default" : "focus:border-[var(--color-accent)] focus:bg-white focus:ring-1 focus:ring-offset-0"}`}
                     />
                   </td>
                 ))}

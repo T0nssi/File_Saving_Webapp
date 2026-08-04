@@ -3,6 +3,7 @@ import { dbConnect } from "@/lib/mongodb";
 import RevisionModel from "@/models/Revision";
 import FileModel from "@/models/File";
 import { requireUser } from "@/lib/session";
+import { canEdit, canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { getBucket } from "@/lib/gridfs";
 import { claimNextVersion } from "@/lib/revisionVersion";
 import { Readable } from "stream";
@@ -21,10 +22,14 @@ export async function POST(req: NextRequest, { params }: Params) {
     const { versionNumber } = await req.json();
 
     await dbConnect();
+    await ensureFileOwnersBackfilled();
 
     const file = await FileModel.findById(id);
-    if (!file) {
+    if (!file || !canView(file, requester)) {
       return NextResponse.json({ error: "File not found" }, { status: 404 });
+    }
+    if (!canEdit(file, requester)) {
+      return NextResponse.json({ error: "You don't have edit access to this file" }, { status: 403 });
     }
 
     const revision = await RevisionModel.findOne({ fileId: id, versionNumber });
