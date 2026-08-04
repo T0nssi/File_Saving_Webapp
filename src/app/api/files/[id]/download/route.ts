@@ -37,7 +37,14 @@ export async function GET(req: NextRequest, { params }: Params) {
     const webStream = Readable.toWeb(nodeStream) as ReadableStream;
 
     const searchParams = new URL(req.url).searchParams;
-    const disposition = searchParams.get("download") === "1" ? "attachment" : "inline";
+    // SVG can carry a <script>, which browsers execute same-origin — but only
+    // on a top-level navigation to the raw URL (e.g. "open image in new tab"),
+    // never when loaded via <img>/<iframe> as this app's own UI does. Forcing
+    // 'attachment' here blocks that navigation path (browsers still render
+    // the bytes fine inside <img>, since Content-Disposition doesn't affect
+    // in-page image decoding) without breaking any existing thumbnail/preview.
+    const forceAttachment = doc.mimeType === "image/svg+xml";
+    const disposition = forceAttachment || searchParams.get("download") === "1" ? "attachment" : "inline";
 
     // Thumbnail grid loads hit this same route on every render — only count it
     // as a genuine "open" when the caller flags an explicit view/download.
