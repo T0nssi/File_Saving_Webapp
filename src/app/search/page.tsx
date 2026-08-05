@@ -2,7 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
-import { Search as SearchIcon, Download, X, FileText } from "lucide-react";
+import { Search as SearchIcon, Download, X, FileText, FileBox } from "lucide-react";
 import FileCard from "@/components/FileCard";
 import FolderSidebar from "@/components/FolderSidebar";
 import FolderGrid from "@/components/FolderGrid";
@@ -10,6 +10,7 @@ import StoragePanel from "@/components/StoragePanel";
 import { ConfirmModal } from "@/components/Dialog";
 import { getCachedSearch, setCachedSearch } from "@/lib/searchCache";
 import { apiFetch } from "@/lib/apiFetch";
+import { getFileKind } from "@/lib/fileKind";
 import type { FileDoc, FolderDoc, Paginated, TagCount } from "@/types";
 
 const POLL_INTERVAL_MS = 15_000;
@@ -44,6 +45,14 @@ function SearchPageInner() {
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<FileDoc | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    apiFetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { role: string | null } | null) => setIsAdmin(d?.role === "admin"))
+      .catch(() => {});
+  }, []);
 
   function updateUrl(next: { q?: string; tag?: string; folderId?: string | null; page?: number }) {
     const params = new URLSearchParams(searchParams.toString());
@@ -215,6 +224,7 @@ function SearchPageInner() {
             onDropFile={handleMove}
             refreshKey={foldersRefreshKey}
             onChanged={() => setFoldersRefreshKey((k) => k + 1)}
+            canDelete={isAdmin}
           />
           <StoragePanel refreshKey={foldersRefreshKey} />
         </div>
@@ -324,7 +334,9 @@ function SearchPageInner() {
           onClick={() => setPreview(null)}
         >
           <div
-            className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-[var(--color-surface)]"
+            className={`flex max-h-[90vh] w-full flex-col overflow-hidden rounded-xl bg-[var(--color-surface)] ${
+              getFileKind(preview.mimeType, preview.filename) === "pdf" ? "max-w-4xl" : "max-w-2xl"
+            }`}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
@@ -334,19 +346,43 @@ function SearchPageInner() {
               </button>
             </div>
             <div className="flex flex-1 items-center justify-center overflow-auto bg-zinc-50 p-4">
-              {preview.mimeType.startsWith("image/") ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={`/api/files/${preview._id}/download`}
-                  alt={preview.filename}
-                  className="max-h-[60vh] max-w-full object-contain"
-                />
-              ) : (
-                <div className="flex flex-col items-center gap-2 text-[var(--color-muted)]">
-                  <FileText size={40} />
-                  <p className="text-sm">No inline preview for this file type.</p>
-                </div>
-              )}
+              {(() => {
+                const kind = getFileKind(preview.mimeType, preview.filename);
+                if (kind === "image") {
+                  return (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={`/api/files/${preview._id}/download?view=1`}
+                      alt={preview.filename}
+                      className="max-h-[60vh] max-w-full object-contain"
+                    />
+                  );
+                }
+                if (kind === "pdf") {
+                  return (
+                    <iframe
+                      src={`/api/files/${preview._id}/download?view=1`}
+                      title={preview.filename}
+                      className="h-[70vh] w-full rounded border-0 bg-white"
+                    />
+                  );
+                }
+                if (kind === "cad") {
+                  return (
+                    <div className="flex flex-col items-center gap-2 text-[var(--color-muted)]">
+                      <FileBox size={40} className="text-amber-600" />
+                      <p className="text-sm">CAD files can&apos;t be previewed in the browser.</p>
+                      <p className="text-xs">Download it to open in CAD software.</p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="flex flex-col items-center gap-2 text-[var(--color-muted)]">
+                    <FileText size={40} />
+                    <p className="text-sm">No inline preview for this file type.</p>
+                  </div>
+                );
+              })()}
             </div>
             <div className="flex items-center justify-between border-t border-[var(--color-border)] px-4 py-3 text-sm">
               <p className="text-[var(--color-muted)]">{preview.description || "No description"}</p>

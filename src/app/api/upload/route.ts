@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Readable } from "stream";
+import busboy from "busboy";
 import { dbConnect } from "@/lib/mongodb";
 import { getBucket } from "@/lib/gridfs";
 import FileModel from "@/models/File";
 import { logEvent } from "@/lib/logger";
-import { requireUser } from "@/lib/session";
+import { requireUser, CurrentUser } from "@/lib/session";
 import {
-  ALLOWED_MIME_TYPES,
+  isAllowedUpload,
   MAX_FILE_SIZE,
   MAX_FILES_PER_UPLOAD,
   isValidObjectId,
@@ -14,82 +15,169 @@ import {
   sanitizeDescription,
   sanitizeFilename,
 } from "@/lib/validation";
+import type { GridFSBucket } from "mongodb";
 
 export const runtime = "nodejs";
+
+interface RejectedFile {
+  name: string;
+  reason: string;
+}
+
+// Streams the multipart body straight into GridFS as it arrives, instead of
+// buffering the whole request (req.formData()) and then the whole file again
+// (file.arrayBuffer()) in memory before writing anything — that double-buffer
+// approach caps uploads at whatever fits in RAM twice over, which rules out
+// anything beyond a couple hundred MB on a typical server. This keeps memory
+// use bounded by chunk size regardless of file size, so multi-GB uploads are
+// limited by MAX_FILE_SIZE_BYTES and available disk, not RAM.
+function parseUpload(
+  req: NextRequest,
+  bucket: GridFSBucket,
+  requester: CurrentUser
+): Promise<{ saved: unknown[]; rejected: RejectedFile[] }> {
+  return new Promise((resolve, reject) => {
+    if (!req.body) {
+      resolve({ saved: [], rejected: [] });
+      return;
+    }
+
+    const bb = busboy({
+      headers: Object.fromEntries(req.headers),
+      limits: { fileSize: MAX_FILE_SIZE, files: MAX_FILES_PER_UPLOAD },
+    });
+
+    const fields: Record<string, string> = {};
+    const saved: unknown[] = [];
+    const rejected: RejectedFile[] = [];
+    const pending: Promise<void>[] = [];
+    // Tracked so a parse-level error (e.g. the client disconnects mid-upload)
+    // can abort any GridFS writes still in flight instead of leaving them
+    // stuck open indefinitely, waiting for a 'finish' that will never come.
+    const activeUploads = new Set<ReturnType<GridFSBucket["openUploadStream"]>>();
+    let filesLimitHit = false;
+
+    bb.on("field", (name, value) => {
+      fields[name] = value;
+    });
+
+    bb.on("filesLimit", () => {
+      filesLimitHit = true;
+    });
+
+    bb.on("file", (_fieldname, fileStream, info) => {
+      const { filename, mimeType } = info;
+
+      if (!isAllowedUpload(mimeType, filename)) {
+        rejected.push({ name: filename, reason: `type "${mimeType}" not allowed` });
+        fileStream.resume(); // drain without storing
+        return;
+      }
+
+      const safeName = sanitizeFilename(filename);
+      const uploadStream = bucket.openUploadStream(safeName, { contentType: mimeType });
+      activeUploads.add(uploadStream);
+
+      const task = new Promise<void>((resolveTask) => {
+        let truncated = false;
+        fileStream.on("limit", () => {
+          truncated = true;
+          uploadStream.destroy(new Error("size limit exceeded"));
+        });
+
+        uploadStream.on("error", async () => {
+          activeUploads.delete(uploadStream);
+          try {
+            await bucket.delete(uploadStream.id);
+          } catch {
+            // Nothing was written, or already gone — fine either way.
+          }
+          rejected.push({
+            name: filename,
+            reason: truncated ? "exceeds max file size" : "upload error",
+          });
+          resolveTask();
+        });
+
+        uploadStream.on("finish", async () => {
+          activeUploads.delete(uploadStream);
+          try {
+            const folderIdRaw = fields.folderId ?? "";
+            const folderId = folderIdRaw && isValidObjectId(folderIdRaw) ? folderIdRaw : null;
+            const doc = await FileModel.create({
+              filename: safeName,
+              originalName: filename,
+              mimeType,
+              size: uploadStream.length,
+              gridFsId: uploadStream.id,
+              tags: parseTags(fields.tags ?? ""),
+              description: sanitizeDescription(fields.description ?? ""),
+              folderId,
+              uploadedBy: requester.username,
+              ownerId: requester.id,
+            });
+            await logEvent({
+              level: "info",
+              action: "upload",
+              message: `Uploaded "${safeName}" (${uploadStream.length} bytes)`,
+              fileId: doc._id.toString(),
+              meta: { mimeType, folderId, uploadedBy: requester.username },
+            });
+            saved.push(doc);
+          } catch (err) {
+            try {
+              await bucket.delete(uploadStream.id);
+            } catch {
+              // Best-effort cleanup only.
+            }
+            const message = err instanceof Error ? err.message : "database error";
+            rejected.push({ name: filename, reason: message });
+          }
+          resolveTask();
+        });
+
+        fileStream.pipe(uploadStream);
+      });
+
+      pending.push(task);
+    });
+
+    bb.on("error", (err) => {
+      for (const stream of activeUploads) {
+        stream.destroy(new Error("upload aborted"));
+      }
+      reject(err instanceof Error ? err : new Error("Upload parse error"));
+    });
+
+    bb.on("close", async () => {
+      await Promise.all(pending);
+      if (filesLimitHit) {
+        rejected.push({ name: "(additional files)", reason: `exceeds max ${MAX_FILES_PER_UPLOAD} files per upload` });
+      }
+      resolve({ saved, rejected });
+    });
+
+    Readable.fromWeb(req.body as import("stream/web").ReadableStream).pipe(bb);
+  });
+}
 
 export async function POST(req: NextRequest) {
   try {
     const requester = await requireUser(req);
     if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+    const contentType = req.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().includes("multipart/form-data")) {
+      return NextResponse.json({ error: "Expected multipart/form-data" }, { status: 400 });
+    }
+
     await dbConnect();
-
-    const formData = await req.formData();
-    const incoming = formData.getAll("files").filter((f): f is File => f instanceof File);
-    const description = sanitizeDescription(String(formData.get("description") ?? ""));
-    const tags = parseTags(String(formData.get("tags") ?? ""));
-    const folderIdRaw = String(formData.get("folderId") ?? "");
-    const folderId = folderIdRaw && isValidObjectId(folderIdRaw) ? folderIdRaw : null;
-    const uploadedBy = requester.username;
-
-    if (incoming.length === 0) {
-      return NextResponse.json({ error: "No files provided" }, { status: 400 });
-    }
-    if (incoming.length > MAX_FILES_PER_UPLOAD) {
-      return NextResponse.json(
-        { error: `Too many files. Max ${MAX_FILES_PER_UPLOAD} per upload.` },
-        { status: 400 }
-      );
-    }
-
     const bucket = await getBucket();
-    const saved = [];
-    const rejected: { name: string; reason: string }[] = [];
 
-    for (const file of incoming) {
-      if (file.size > MAX_FILE_SIZE) {
-        rejected.push({ name: file.name, reason: "exceeds max file size" });
-        continue;
-      }
-      if (!ALLOWED_MIME_TYPES.includes(file.type)) {
-        rejected.push({ name: file.name, reason: `type "${file.type}" not allowed` });
-        continue;
-      }
+    const { saved, rejected } = await parseUpload(req, bucket, requester);
 
-      const safeName = sanitizeFilename(file.name);
-      const buffer = Buffer.from(await file.arrayBuffer());
-
-      const gridId = await new Promise<import("mongodb").ObjectId>((resolve, reject) => {
-        const uploadStream = bucket.openUploadStream(safeName, {
-          contentType: file.type,
-        });
-        Readable.from(buffer)
-          .pipe(uploadStream)
-          .on("error", reject)
-          .on("finish", () => resolve(uploadStream.id));
-      });
-
-      const doc = await FileModel.create({
-        filename: safeName,
-        originalName: file.name,
-        mimeType: file.type,
-        size: file.size,
-        gridFsId: gridId,
-        tags,
-        description,
-        folderId,
-        uploadedBy,
-      });
-
-      await logEvent({
-        level: "info",
-        action: "upload",
-        message: `Uploaded "${safeName}" (${file.size} bytes)`,
-        fileId: doc._id.toString(),
-        meta: { tags, mimeType: file.type, folderId, uploadedBy },
-      });
-
-      saved.push(doc);
+    if (saved.length === 0 && rejected.length === 0) {
+      return NextResponse.json({ error: "No files provided" }, { status: 400 });
     }
 
     for (const r of rejected) {

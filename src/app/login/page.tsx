@@ -4,16 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Vault, User, Lock, Loader2, AlertTriangle } from "lucide-react";
-
-// The "from" query param is attacker-controllable (anyone can send someone
-// a link like /login?from=https://evil.example), so it must never be used
-// as-is for a redirect — only a same-origin relative path is safe. Without
-// this, a crafted link could send someone to an external site right after
-// they type their real password into the legitimate login form.
-function sanitizeRedirectPath(path: string): string {
-  if (!path.startsWith("/") || path.startsWith("//") || path.includes("://")) return "/";
-  return path;
-}
+import { sanitizeRedirectPath } from "@/lib/redirect";
 
 function LoginForm() {
   const searchParams = useSearchParams();

@@ -3,8 +3,11 @@ import { Readable } from "stream";
 import { dbConnect } from "@/lib/mongodb";
 import { getBucket } from "@/lib/gridfs";
 import FileModel from "@/models/File";
+import { requireUser } from "@/lib/session";
+import { canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { isValidObjectId } from "@/lib/validation";
 import { logEvent } from "@/lib/logger";
+import { recordFileAccess } from "@/lib/fileAccessLog";
 
 export const runtime = "nodejs";
 
@@ -13,22 +16,41 @@ interface Params {
 }
 
 export async function GET(req: NextRequest, { params }: Params) {
+  const requester = await requireUser(req);
+  if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   const { id } = await params;
   if (!isValidObjectId(id)) {
     return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   }
 
   await dbConnect();
+  await ensureFileOwnersBackfilled();
   const doc = await FileModel.findById(id).lean();
-  if (!doc) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!doc || !canView(doc, requester)) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
 
   try {
     const bucket = await getBucket();
     const nodeStream = bucket.openDownloadStream(doc.gridFsId);
     const webStream = Readable.toWeb(nodeStream) as ReadableStream;
 
-    const disposition =
-      new URL(req.url).searchParams.get("download") === "1" ? "attachment" : "inline";
+    const searchParams = new URL(req.url).searchParams;
+    // SVG can carry a <script>, which browsers execute same-origin — but only
+    // on a top-level navigation to the raw URL (e.g. "open image in new tab"),
+    // never when loaded via <img>/<iframe> as this app's own UI does. Forcing
+    // 'attachment' here blocks that navigation path (browsers still render
+    // the bytes fine inside <img>, since Content-Disposition doesn't affect
+    // in-page image decoding) without breaking any existing thumbnail/preview.
+    const forceAttachment = doc.mimeType === "image/svg+xml";
+    const disposition = forceAttachment || searchParams.get("download") === "1" ? "attachment" : "inline";
+
+    // Thumbnail grid loads hit this same route on every render — only count it
+    // as a genuine "open" when the caller flags an explicit view/download.
+    if (searchParams.get("download") === "1" || searchParams.get("view") === "1") {
+      recordFileAccess(id, requester.username);
+    }
 
     return new NextResponse(webStream, {
       headers: {

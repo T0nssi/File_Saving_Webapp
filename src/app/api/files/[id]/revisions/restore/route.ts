@@ -1,0 +1,139 @@
+import { NextRequest, NextResponse } from "next/server";
+import { dbConnect } from "@/lib/mongodb";
+import RevisionModel from "@/models/Revision";
+import FileModel from "@/models/File";
+import { requireUser } from "@/lib/session";
+import { canEdit, canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
+import { getBucket } from "@/lib/gridfs";
+import { claimNextVersion } from "@/lib/revisionVersion";
+import { Readable } from "stream";
+import type mongoose from "mongoose";
+
+interface Params {
+  params: Promise<{ id: string }>;
+}
+
+export async function POST(req: NextRequest, { params }: Params) {
+  try {
+    const requester = await requireUser(req);
+    if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const { id } = await params;
+    const { versionNumber } = await req.json();
+
+    await dbConnect();
+    await ensureFileOwnersBackfilled();
+
+    const file = await FileModel.findById(id);
+    if (!file || !canView(file, requester)) {
+      return NextResponse.json({ error: "File not found" }, { status: 404 });
+    }
+    if (!canEdit(file, requester)) {
+      return NextResponse.json({ error: "You don't have edit access to this file" }, { status: 403 });
+    }
+
+    const revision = await RevisionModel.findOne({ fileId: id, versionNumber });
+    if (!revision) {
+      return NextResponse.json({ error: "Revision not found" }, { status: 404 });
+    }
+
+    const bucket = await getBucket();
+
+    // Read revision file
+    let buffer: Buffer;
+    try {
+      const downloadStream = bucket.openDownloadStream(revision.gridFsId);
+      const chunks: Buffer[] = [];
+
+      await new Promise<void>((resolve, reject) => {
+        downloadStream.on("data", (chunk) => chunks.push(chunk));
+        downloadStream.on("end", () => resolve());
+        downloadStream.on("error", reject);
+      });
+
+      buffer = Buffer.concat(chunks);
+    } catch (err) {
+      const isMissing =
+        (err as { code?: string })?.code === "ENOENT" ||
+        (err instanceof Error && /FileNotFound/i.test(err.message));
+      if (isMissing) {
+        console.error(`Revision ${id}@v${versionNumber} points to missing GridFS file ${revision.gridFsId}`);
+        return NextResponse.json(
+          {
+            error:
+              "This version's saved file no longer exists in storage (it was likely lost to a previous bug) and can't be restored. Try a different version.",
+          },
+          { status: 410 }
+        );
+      }
+      throw err;
+    }
+
+    // Upload restored file (before touching the current one, so a failure here leaves the file untouched)
+    const uploadStream = bucket.openUploadStream(file.originalName);
+    let uploadedId: mongoose.Types.ObjectId | undefined;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        uploadStream.on("error", reject);
+        const readable = Readable.from([buffer]);
+        readable.pipe(uploadStream, { end: true });
+        uploadStream.on("finish", () => resolve());
+      });
+
+      uploadedId = uploadStream.id as mongoose.Types.ObjectId;
+      if (!uploadedId) {
+        throw new Error("Upload did not return a valid file ID");
+      }
+
+      // Atomically claim the next version number so restore participates in the same counter as saves.
+      const nextVersion = await claimNextVersion(id);
+
+      // Record the restore itself as a new revision so history stays linear (git-style revert).
+      const oldGridFsId = file.gridFsId;
+      const oldSize = file.size;
+      const restoreRevision = new RevisionModel({
+        fileId: id,
+        versionNumber: nextVersion,
+        gridFsId: oldGridFsId,
+        changedBy: requester.username,
+        changesSummary: `Restored to version ${versionNumber} by ${requester.username}`,
+        size: oldSize,
+      });
+      await restoreRevision.save();
+
+      // Update file record with new gridFsId
+      file.gridFsId = uploadedId;
+      file.size = buffer.length;
+      file.currentVersion = nextVersion;
+      await file.save();
+
+      // Note: oldGridFsId is NOT deleted — restoreRevision now owns that blob as
+      // its permanent snapshot. Deleting it here would break the revision the
+      // moment it's created (this was the actual cause of "file no longer exists"
+      // on restore, beyond just pre-fix legacy data).
+
+      return NextResponse.json({
+        success: true,
+        file: file.toObject(),
+        version: nextVersion,
+      });
+    } catch (err) {
+      // Roll back the orphaned upload so GridFS doesn't leak storage on failure.
+      if (uploadedId) {
+        try {
+          await bucket.delete(uploadedId);
+        } catch {
+          // Best effort cleanup only
+        }
+      }
+      throw err;
+    }
+  } catch (error) {
+    console.error("Revision restore error:", error);
+    return NextResponse.json(
+      { error: "Failed to restore revision" },
+      { status: 500 }
+    );
+  }
+}

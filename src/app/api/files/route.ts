@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { dbConnect } from "@/lib/mongodb";
 import FileModel from "@/models/File";
 import { logEvent } from "@/lib/logger";
+import { requireUser } from "@/lib/session";
+import { accessFilter, ensureFileOwnersBackfilled, getFileAccess, isOwnerOrAdmin } from "@/lib/filePermissions";
 import { isValidObjectId, sanitizeTag } from "@/lib/validation";
 import { buildTextFilter } from "@/lib/search";
 import type { FilterQuery } from "mongoose";
@@ -9,7 +11,11 @@ import type { IFile } from "@/models/File";
 
 export async function GET(req: NextRequest) {
   try {
+    const requester = await requireUser(req);
+    if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
     await dbConnect();
+    await ensureFileOwnersBackfilled();
     const { searchParams } = new URL(req.url);
 
     const q = searchParams.get("q")?.trim().slice(0, 200) ?? "";
@@ -20,7 +26,13 @@ export async function GET(req: NextRequest) {
 
     const filter: FilterQuery<IFile> = {};
     const textFilters = q ? buildTextFilter(q) : [];
-    if (textFilters.length > 0) filter.$and = textFilters;
+    // Access scoping rides alongside the text-search clauses in the same $and —
+    // for a non-admin this restricts results to files they own or are shared
+    // with, regardless of what else the query matches.
+    const access = accessFilter(requester);
+    const andClauses: FilterQuery<IFile>[] = [...textFilters];
+    if (Object.keys(access).length > 0) andClauses.push(access);
+    if (andClauses.length > 0) filter.$and = andClauses;
     if (tag) filter.tags = tag;
     // No folderId param at all = browse every file regardless of folder.
     // folderId=root = only files not filed into any folder yet.
@@ -47,7 +59,11 @@ export async function GET(req: NextRequest) {
     }
 
     return NextResponse.json({
-      items,
+      items: items.map((item) => ({
+        ...item,
+        myAccess: getFileAccess(item, requester),
+        canManageSharing: isOwnerOrAdmin(item, requester),
+      })),
       total,
       page,
       pages: Math.max(1, Math.ceil(total / limit)),
