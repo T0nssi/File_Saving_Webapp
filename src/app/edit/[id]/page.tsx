@@ -81,10 +81,14 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
 
   const kind = file ? getFileKind(file.mimeType, file.filename) : "other";
 
+  // Revisions aren't image-specific — a file of any type can gain one via
+  // the duplicate-name-on-upload "new version" resolution, not just images
+  // replaced through the button below — so history is always fetched, the
+  // same as the Excel editor page does.
   useEffect(() => {
-    if (kind === "image") fetchRevisions();
+    fetchRevisions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, kind]);
+  }, [id]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -288,15 +292,15 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
         >
           <Copy size={16} /> Save As
         </button>
+        <button
+          type="button"
+          onClick={() => setShowRevisions(!showRevisions)}
+          className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
+        >
+          <Clock size={16} /> History
+        </button>
         {kind === "image" && (
           <>
-            <button
-              type="button"
-              onClick={() => setShowRevisions(!showRevisions)}
-              className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
-            >
-              <Clock size={16} /> History
-            </button>
             {!readOnly && (
               <>
                 <input
@@ -361,7 +365,7 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
         </div>
       )}
 
-      {showRevisions && kind === "image" && (
+      {showRevisions && (
         <div className="rounded-lg border border-[var(--color-border)] bg-zinc-50 p-4">
           <h2 className="mb-3 font-semibold">Revision History</h2>
           {revisionsWarning && (
