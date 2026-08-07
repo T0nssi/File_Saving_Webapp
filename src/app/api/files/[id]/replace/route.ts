@@ -4,10 +4,9 @@ import busboy from "busboy";
 import { dbConnect } from "@/lib/mongodb";
 import { getBucket } from "@/lib/gridfs";
 import FileModel from "@/models/File";
-import RevisionModel from "@/models/Revision";
 import { requireUser } from "@/lib/session";
 import { canEdit, canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
-import { claimNextVersion } from "@/lib/revisionVersion";
+import { applyAsNewVersion } from "@/lib/fileVersioning";
 import { isAllowedUpload, isValidObjectId, MAX_FILE_SIZE, sanitizeFilename } from "@/lib/validation";
 import type { GridFSBucket } from "mongodb";
 
@@ -136,33 +135,25 @@ export async function POST(req: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
 
-    const oldGridFsId = file.gridFsId;
     const oldSize = file.size;
 
     try {
-      const nextVersion = await claimNextVersion(id);
+      const result = await applyAsNewVersion(
+        id,
+        uploaded,
+        requester,
+        `Replaced image (${(oldSize / 1024).toFixed(1)} KB → ${(uploaded.size / 1024).toFixed(1)} KB)`
+      );
+      if (!result.ok) {
+        await bucket.delete(uploaded.gridFsId).catch(() => {});
+        return NextResponse.json({ error: result.reason }, { status: 400 });
+      }
 
-      const revision = new RevisionModel({
-        fileId: id,
-        versionNumber: nextVersion,
-        gridFsId: oldGridFsId,
-        changedBy: requester.username,
-        changesSummary: `Replaced image (${(oldSize / 1024).toFixed(1)} KB → ${(uploaded.size / 1024).toFixed(1)} KB)`,
-        size: oldSize,
+      return NextResponse.json({
+        success: true,
+        file: result.file.toObject(),
+        version: result.file.currentVersion,
       });
-      await revision.save();
-
-      file.gridFsId = uploaded.gridFsId;
-      file.size = uploaded.size;
-      file.mimeType = uploaded.mimeType;
-      file.currentVersion = nextVersion;
-      await file.save();
-
-      // Note: oldGridFsId is NOT deleted — the revision just created above
-      // now owns that blob as its permanent snapshot (see excel/route.ts for
-      // the same reasoning and the bug this pattern fixed there).
-
-      return NextResponse.json({ success: true, file: file.toObject(), version: nextVersion });
     } catch (err) {
       try {
         await bucket.delete(uploaded.gridFsId);

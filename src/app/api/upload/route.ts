@@ -6,6 +6,7 @@ import { getBucket } from "@/lib/gridfs";
 import FileModel from "@/models/File";
 import { logEvent } from "@/lib/logger";
 import { requireUser, CurrentUser } from "@/lib/session";
+import { applyAsNewVersion } from "@/lib/fileVersioning";
 import {
   isAllowedUpload,
   MAX_FILE_SIZE,
@@ -35,10 +36,10 @@ function parseUpload(
   req: NextRequest,
   bucket: GridFSBucket,
   requester: CurrentUser
-): Promise<{ saved: unknown[]; rejected: RejectedFile[] }> {
+): Promise<{ saved: unknown[]; rejected: RejectedFile[]; versioned: number }> {
   return new Promise((resolve, reject) => {
     if (!req.body) {
-      resolve({ saved: [], rejected: [] });
+      resolve({ saved: [], rejected: [], versioned: 0 });
       return;
     }
 
@@ -56,6 +57,34 @@ function parseUpload(
     // stuck open indefinitely, waiting for a 'finish' that will never come.
     const activeUploads = new Set<ReturnType<GridFSBucket["openUploadStream"]>>();
     let filesLimitHit = false;
+    let versioned = 0;
+
+    // Maps an incoming file's original name to the id of an existing file it
+    // should become a new version of, instead of creating a brand-new File
+    // doc — populated from the "versionTargets" field the client sends (see
+    // upload/page.tsx's duplicate-name resolution flow). Parsed lazily, once,
+    // the first time a file part needs it; by then the field has already
+    // arrived, since the client always appends fields before files.
+    let versionTargets: Map<string, string> | null = null;
+    function getVersionTargets(): Map<string, string> {
+      if (versionTargets) return versionTargets;
+      versionTargets = new Map();
+      if (fields.versionTargets) {
+        try {
+          const parsed = JSON.parse(fields.versionTargets);
+          if (parsed && typeof parsed === "object") {
+            for (const [name, targetId] of Object.entries(parsed)) {
+              if (typeof targetId === "string" && isValidObjectId(targetId)) {
+                versionTargets.set(name, targetId);
+              }
+            }
+          }
+        } catch {
+          // Malformed — treat as no version targets rather than failing the upload.
+        }
+      }
+      return versionTargets;
+    }
 
     bb.on("field", (name, value) => {
       fields[name] = value;
@@ -74,6 +103,7 @@ function parseUpload(
         return;
       }
 
+      const targetFileId = getVersionTargets().get(filename) ?? null;
       const safeName = sanitizeFilename(filename);
       const uploadStream = bucket.openUploadStream(safeName, { contentType: mimeType });
       activeUploads.add(uploadStream);
@@ -102,28 +132,51 @@ function parseUpload(
         uploadStream.on("finish", async () => {
           activeUploads.delete(uploadStream);
           try {
-            const folderIdRaw = fields.folderId ?? "";
-            const folderId = folderIdRaw && isValidObjectId(folderIdRaw) ? folderIdRaw : null;
-            const doc = await FileModel.create({
-              filename: safeName,
-              originalName: filename,
-              mimeType,
-              size: uploadStream.length,
-              gridFsId: uploadStream.id,
-              tags: parseTags(fields.tags ?? ""),
-              description: sanitizeDescription(fields.description ?? ""),
-              folderId,
-              uploadedBy: requester.username,
-              ownerId: requester.id,
-            });
-            await logEvent({
-              level: "info",
-              action: "upload",
-              message: `Uploaded "${safeName}" (${uploadStream.length} bytes)`,
-              fileId: doc._id.toString(),
-              meta: { mimeType, folderId, uploadedBy: requester.username },
-            });
-            saved.push(doc);
+            if (targetFileId) {
+              const result = await applyAsNewVersion(
+                targetFileId,
+                { gridFsId: uploadStream.id, size: uploadStream.length, mimeType },
+                requester,
+                `Uploaded as new version (duplicate name resolved) — ${(uploadStream.length / 1024).toFixed(1)} KB`
+              );
+              if (!result.ok) {
+                await bucket.delete(uploadStream.id).catch(() => {});
+                rejected.push({ name: filename, reason: result.reason });
+              } else {
+                await logEvent({
+                  level: "info",
+                  action: "update",
+                  message: `Versioned "${safeName}" via duplicate-name upload (${uploadStream.length} bytes)`,
+                  fileId: result.file._id.toString(),
+                  meta: { mimeType, uploadedBy: requester.username, version: result.file.currentVersion },
+                });
+                saved.push(result.file);
+                versioned += 1;
+              }
+            } else {
+              const folderIdRaw = fields.folderId ?? "";
+              const folderId = folderIdRaw && isValidObjectId(folderIdRaw) ? folderIdRaw : null;
+              const doc = await FileModel.create({
+                filename: safeName,
+                originalName: filename,
+                mimeType,
+                size: uploadStream.length,
+                gridFsId: uploadStream.id,
+                tags: parseTags(fields.tags ?? ""),
+                description: sanitizeDescription(fields.description ?? ""),
+                folderId,
+                uploadedBy: requester.username,
+                ownerId: requester.id,
+              });
+              await logEvent({
+                level: "info",
+                action: "upload",
+                message: `Uploaded "${safeName}" (${uploadStream.length} bytes)`,
+                fileId: doc._id.toString(),
+                meta: { mimeType, folderId, uploadedBy: requester.username },
+              });
+              saved.push(doc);
+            }
           } catch (err) {
             try {
               await bucket.delete(uploadStream.id);
@@ -154,7 +207,7 @@ function parseUpload(
       if (filesLimitHit) {
         rejected.push({ name: "(additional files)", reason: `exceeds max ${MAX_FILES_PER_UPLOAD} files per upload` });
       }
-      resolve({ saved, rejected });
+      resolve({ saved, rejected, versioned });
     });
 
     Readable.fromWeb(req.body as import("stream/web").ReadableStream).pipe(bb);
@@ -174,7 +227,7 @@ export async function POST(req: NextRequest) {
     await dbConnect();
     const bucket = await getBucket();
 
-    const { saved, rejected } = await parseUpload(req, bucket, requester);
+    const { saved, rejected, versioned } = await parseUpload(req, bucket, requester);
 
     if (saved.length === 0 && rejected.length === 0) {
       return NextResponse.json({ error: "No files provided" }, { status: 400 });
@@ -188,7 +241,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ saved, rejected }, { status: 201 });
+    return NextResponse.json({ saved, rejected, versioned }, { status: 201 });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown upload error";
     await logEvent({ level: "error", action: "upload", message });
