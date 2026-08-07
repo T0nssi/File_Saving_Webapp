@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import DropZone, { relativeDir } from "@/components/DropZone";
 import TagInput from "@/components/TagInput";
 import { PromptModal } from "@/components/Dialog";
 import { apiFetch } from "@/lib/apiFetch";
-import { CheckCircle2, AlertTriangle, Loader2, FolderPlus } from "lucide-react";
+import { CheckCircle2, AlertTriangle, Loader2, FolderPlus, Search, X, Folder as FolderIcon } from "lucide-react";
 import type { TagCount, FolderDoc } from "@/types";
 
 export default function UploadPage() {
@@ -17,6 +17,7 @@ export default function UploadPage() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [folders, setFolders] = useState<FolderDoc[]>([]);
   const [folderId, setFolderId] = useState<string>("root");
+  const [folderQuery, setFolderQuery] = useState("");
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -45,6 +46,33 @@ export default function UploadPage() {
       .then((data: { maxFileSize: number; maxFilesPerUpload: number } | null) => setConfig(data))
       .catch(() => {});
   }, []);
+
+  // Breadcrumb path per folder id, walked from the already-fetched flat list —
+  // same approach as FolderSidebar's search, so a nested folder reads as
+  // "Parent / Child" instead of just its own name.
+  const folderPathById = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f._id, f]));
+    const paths = new Map<string, string>();
+    function pathOf(id: string): string {
+      if (paths.has(id)) return paths.get(id)!;
+      const f = byId.get(id);
+      if (!f) return "";
+      const parentPath = f.parentId ? pathOf(f.parentId) : "";
+      const full = parentPath ? `${parentPath} / ${f.name}` : f.name;
+      paths.set(id, full);
+      return full;
+    }
+    folders.forEach((f) => pathOf(f._id));
+    return paths;
+  }, [folders]);
+
+  const folderSearchResults = useMemo(() => {
+    const q = folderQuery.trim().toLowerCase();
+    if (!q) return [];
+    return folders.filter((f) => f.name.toLowerCase().includes(q)).slice(0, 50);
+  }, [folderQuery, folders]);
+
+  const selectedFolderLabel = folderId === "root" ? "ยังไม่จัดหมวด" : folderPathById.get(folderId) ?? "ยังไม่จัดหมวด";
 
   async function createFolder(name: string) {
     const trimmed = name.trim();
@@ -165,28 +193,51 @@ export default function UploadPage() {
 
       let totalSaved = 0;
       const allRejected: { name: string; reason: string }[] = [...preRejected];
+      // One failing group (a folder's batch) must not abort the others —
+      // each group is an independent request, so a server error or dropped
+      // connection on one folder's files shouldn't stop files destined for
+      // a different folder from uploading. Every failure is still recorded,
+      // both inline for the user and via the server's client-error log.
+      const groupErrors: string[] = [];
       for (const [key, groupFiles] of groups) {
-        const formData = new FormData();
-        // Metadata fields first, files last: the server now streams this
-        // multipart body straight into GridFS as it arrives (see
-        // api/upload/route.ts) rather than buffering it, so it needs tags/
-        // description/folderId parsed before it starts processing file
-        // parts — otherwise a file could finish streaming before the
-        // server even knows which folder it belongs in.
-        formData.append("tags", tags.join(","));
-        formData.append("description", description);
-        if (key !== "root") formData.append("folderId", key);
-        groupFiles.forEach((f) => formData.append("files", f));
+        try {
+          const formData = new FormData();
+          // Metadata fields first, files last: the server now streams this
+          // multipart body straight into GridFS as it arrives (see
+          // api/upload/route.ts) rather than buffering it, so it needs tags/
+          // description/folderId parsed before it starts processing file
+          // parts — otherwise a file could finish streaming before the
+          // server even knows which folder it belongs in.
+          formData.append("tags", tags.join(","));
+          formData.append("description", description);
+          if (key !== "root") formData.append("folderId", key);
+          groupFiles.forEach((f) => formData.append("files", f));
 
-        const res = await apiFetch("/api/upload", { method: "POST", body: formData });
-        const data = await res.json();
-        if (!res.ok) {
-          setError(data.error ?? "Upload failed");
-          setSubmitting(false);
-          return;
+          const res = await apiFetch("/api/upload", { method: "POST", body: formData });
+          const data = await res.json();
+          if (!res.ok) {
+            const reason = data.error ?? "Upload failed";
+            groupErrors.push(reason);
+            groupFiles.forEach((f) => allRejected.push({ name: f.name, reason }));
+            continue;
+          }
+          totalSaved += data.saved.length;
+          allRejected.push(...data.rejected);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : "Network error";
+          groupErrors.push(reason);
+          groupFiles.forEach((f) => allRejected.push({ name: f.name, reason }));
         }
-        totalSaved += data.saved.length;
-        allRejected.push(...data.rejected);
+      }
+
+      if (groupErrors.length > 0) {
+        const message = `${groupErrors.length} of ${groups.size} folder batch(es) failed: ${groupErrors.join("; ")}`;
+        setError(message);
+        apiFetch("/api/logs/client-error", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: `Upload page: ${message}` }),
+        }).catch(() => {});
       }
 
       setFolders(knownFolders.sort((a, b) => a.name.localeCompare(b.name)));
@@ -223,23 +274,33 @@ export default function UploadPage() {
         />
 
         <div>
-          <label htmlFor="folder" className="mb-1.5 block text-sm font-medium">
+          <label htmlFor="folder-search" className="mb-1.5 block text-sm font-medium">
             โฟลเดอร์ปลายทาง
           </label>
+          <p className="mb-1.5 text-xs text-[var(--color-muted)]">
+            เลือกแล้ว: <span className="font-medium text-[var(--color-text)]">{selectedFolderLabel}</span>
+          </p>
           <div className="flex gap-2">
-            <select
-              id="folder"
-              value={folderId}
-              onChange={(e) => setFolderId(e.target.value)}
-              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)]"
-            >
-              <option value="root">ยังไม่จัดหมวด (จัดเข้าโฟลเดอร์ทีหลังได้)</option>
-              {folders.map((f) => (
-                <option key={f._id} value={f._id}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
+            <div className="relative flex-1">
+              <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-muted)]" />
+              <input
+                id="folder-search"
+                value={folderQuery}
+                onChange={(e) => setFolderQuery(e.target.value)}
+                placeholder="ค้นหาโฟลเดอร์…"
+                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] py-2 pl-8 pr-8 text-sm outline-none focus-visible:border-[var(--color-accent)]"
+              />
+              {folderQuery && (
+                <button
+                  type="button"
+                  aria-label="Clear folder search"
+                  onClick={() => setFolderQuery("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-[var(--color-muted)] hover:bg-zinc-100"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
             <button
               type="button"
               onClick={() => {
@@ -252,6 +313,48 @@ export default function UploadPage() {
               <FolderPlus size={16} /> ใหม่
             </button>
           </div>
+
+          {folderQuery.trim() ? (
+            <div className="mt-2 flex max-h-48 flex-col gap-0.5 overflow-y-auto rounded-md border border-[var(--color-border)] p-1">
+              {folderSearchResults.length === 0 ? (
+                <p className="px-2 py-1.5 text-xs text-[var(--color-muted)]">ไม่พบโฟลเดอร์ที่ตรงกัน</p>
+              ) : (
+                folderSearchResults.map((f) => (
+                  <button
+                    key={f._id}
+                    type="button"
+                    onClick={() => {
+                      setFolderId(f._id);
+                      setFolderQuery("");
+                    }}
+                    className="flex flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left hover:bg-zinc-100"
+                  >
+                    <span className="flex items-center gap-1.5 text-sm">
+                      <FolderIcon size={13} className="text-[var(--color-muted)]" />
+                      {f.name}
+                    </span>
+                    <span className="truncate pl-5 text-[11px] text-[var(--color-muted)]">
+                      {folderPathById.get(f._id) || f.name}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          ) : (
+            <select
+              value={folderId}
+              onChange={(e) => setFolderId(e.target.value)}
+              className="mt-2 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)]"
+            >
+              <option value="root">ยังไม่จัดหมวด (จัดเข้าโฟลเดอร์ทีหลังได้)</option>
+              {folders.map((f) => (
+                <option key={f._id} value={f._id}>
+                  {folderPathById.get(f._id) || f.name}
+                </option>
+              ))}
+            </select>
+          )}
+
           <p className="mt-1 text-xs text-[var(--color-muted)]">
             ยังไม่แน่ใจว่าจะเก็บที่ไหน เลือก &quot;ยังไม่จัดหมวด&quot; ไว้ก่อนได้ แล้วค่อยย้ายทีหลังจากหน้า Search
           </p>
@@ -295,8 +398,8 @@ export default function UploadPage() {
               <CheckCircle2 size={16} /> Saved {result.saved} file(s).
             </span>
             {result.rejected.length > 0 &&
-              result.rejected.map((r) => (
-                <span key={r.name} className="pl-6 text-xs text-amber-700">
+              result.rejected.map((r, i) => (
+                <span key={`${r.name}-${i}`} className="pl-6 text-xs text-amber-700">
                   Skipped {r.name}: {r.reason}
                 </span>
               ))}
