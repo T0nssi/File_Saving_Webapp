@@ -394,7 +394,7 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
         </div>
       )}
 
-      {sheets.length > 0 && (
+      {sheets.length > 0 ? (
         <ExcelEditor
           key={sheetsVersion}
           fileId={id}
@@ -404,6 +404,12 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
           saving={saving}
           readOnly={file.myAccess !== "edit"}
         />
+      ) : (
+        loadError && (
+          <div className="flex items-center gap-2 rounded-md bg-red-50 px-3 py-2 text-sm text-[var(--color-danger)]">
+            <AlertTriangle size={16} /> Couldn't load the spreadsheet contents: {loadError}
+          </div>
+        )
       )}
 
       {showShare && (
