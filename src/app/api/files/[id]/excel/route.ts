@@ -57,6 +57,25 @@ const MAX_ROWS = 10000;
 const MAX_COLS = 500;
 const MAX_SHEETS = 50;
 
+// exceljs's own Cell#text getter can throw for a non-master cell inside a
+// merged range whose master cell is empty: internally it resolves to the
+// master's value and calls .toString() on it unconditionally, and an empty
+// master's value is `null` — "Cannot read properties of null (reading
+// 'toString')". Merging cells with no content in the top-left one (a blank
+// spacer row, a header that got cleared, ...) is completely ordinary, so
+// this isn't a rare edge case. Read cell.value first — safe, never calls
+// .toString() — and only fall through to .text (with the crash still
+// guarded, in case some other cell shape has a similar quirk) when there's
+// actually something there.
+function cellText(cell: ExcelJS.Cell): string {
+  if (cell.value === null || cell.value === undefined) return "";
+  try {
+    return cell.text ?? "";
+  } catch {
+    return "";
+  }
+}
+
 // Reads every worksheet in a workbook into the plain string[][] grid the
 // client and the rest of this route work with — the single source of truth
 // for "workbook -> Sheet[]", used both to answer GET and to snapshot the
@@ -77,7 +96,7 @@ function workbookToSheets(workbook: ExcelJS.Workbook): Sheet[] {
       const row = worksheet.getRow(r);
       const rowData: string[] = [];
       for (let c = 1; c <= worksheet.columnCount; c++) {
-        rowData.push(row.getCell(c).text ?? "");
+        rowData.push(cellText(row.getCell(c)));
       }
       data.push(rowData);
     }
