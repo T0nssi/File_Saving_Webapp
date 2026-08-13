@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { dbConnect } from "@/lib/mongodb";
 import FileModel from "@/models/File";
 import RevisionModel from "@/models/Revision";
 import { requireUser } from "@/lib/session";
 import { canEdit, canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { getBucket } from "@/lib/gridfs";
-import { getColumnLetter, getCellAddress } from "@/lib/excelUtils";
+import { getCellAddress } from "@/lib/excelUtils";
 import { claimNextVersion } from "@/lib/revisionVersion";
 import { MAX_EXCEL_FILE_SIZE } from "@/lib/validation";
 import { Readable } from "stream";
@@ -14,6 +14,17 @@ import type mongoose from "mongoose";
 
 interface Params {
   params: Promise<{ id: string }>;
+}
+
+// exceljs bundles its own minimal `declare interface Buffer extends ArrayBuffer {}`
+// stub (see node_modules/exceljs/index.d.ts) instead of relying on @types/node's
+// real Buffer type, and that stub is stricter about ArrayBuffer-only members
+// (resizable, maxByteLength, ...) than a real Node Buffer actually has — a known
+// upstream typing gap, not a real runtime mismatch (a real Buffer works fine here).
+async function loadWorkbook(buffer: Buffer): Promise<ExcelJS.Workbook> {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer as unknown as ArrayBuffer);
+  return workbook;
 }
 
 interface Sheet {
@@ -35,6 +46,61 @@ const MAX_FILE_SIZE = MAX_EXCEL_FILE_SIZE;
 const MAX_ROWS = 10000;
 const MAX_COLS = 500;
 const MAX_SHEETS = 50;
+
+// Reads every worksheet in a workbook into the plain string[][] grid the
+// client and the rest of this route work with — the single source of truth
+// for "workbook -> Sheet[]", used both to answer GET and to snapshot the
+// previous content in POST for change-tracking, so the two can't drift.
+function workbookToSheets(workbook: ExcelJS.Workbook): Sheet[] {
+  return workbook.worksheets.map((worksheet) => {
+    // Fail fast on a workbook that's oversized before materializing any
+    // arrays — actualRowCount/columnCount reflect genuinely populated
+    // cells (unlike a stale declared range), so this can't be defeated by
+    // a file that just claims a huge range without real content in it.
+    if (worksheet.rowCount > MAX_ROWS) {
+      throw new Error(`Sheet "${worksheet.name}" exceeds maximum rows (${MAX_ROWS})`);
+    }
+    if (worksheet.columnCount > MAX_COLS) {
+      throw new Error(`Sheet "${worksheet.name}" exceeds maximum columns (${MAX_COLS})`);
+    }
+
+    let data: string[][] = [];
+    for (let r = 1; r <= worksheet.rowCount; r++) {
+      const row = worksheet.getRow(r);
+      const rowData: string[] = [];
+      for (let c = 1; c <= worksheet.columnCount; c++) {
+        rowData.push(row.getCell(c).text ?? "");
+      }
+      data.push(rowData);
+    }
+
+    // Trim trailing empty rows
+    while (data.length > 0 && data[data.length - 1]?.every((cell) => !cell)) {
+      data.pop();
+    }
+
+    if (data.length === 0) {
+      return { name: worksheet.name, data: [Array(10).fill("")] };
+    }
+
+    // Trim trailing empty columns
+    const maxCols = Math.max(...data.map((row) => row.length));
+    let actualMaxCols = 0;
+    for (let col = 0; col < maxCols; col++) {
+      const hasValue = data.some((row) => row[col]);
+      if (hasValue) actualMaxCols = col + 1;
+    }
+
+    // Normalize rows to have consistent column count
+    data = data.map((row) => {
+      const normalized = [...row];
+      while (normalized.length < actualMaxCols) normalized.push("");
+      return normalized.slice(0, actualMaxCols);
+    });
+
+    return { name: worksheet.name, data: data.length ? data : [Array(10).fill("")] };
+  });
+}
 
 // Compare old and new data and return list of changes
 function compareSheetData(
@@ -141,63 +207,17 @@ export async function GET(req: NextRequest, { params }: Params) {
     }
 
     const buffer = Buffer.concat(chunks);
-    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const workbook = await loadWorkbook(buffer);
 
     // Security: Check number of sheets
-    if (workbook.SheetNames.length > MAX_SHEETS) {
+    if (workbook.worksheets.length > MAX_SHEETS) {
       return NextResponse.json(
         { error: `File contains too many sheets (max ${MAX_SHEETS})` },
         { status: 400 }
       );
     }
 
-    const sheets = workbook.SheetNames.map((sheetName) => {
-      const worksheet = workbook.Sheets[sheetName];
-      if (!worksheet) {
-        return { name: sheetName, data: [Array(10).fill("")] };
-      }
-      let data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
-
-      // Trim trailing empty rows
-      while (data.length > 0 && data[data.length - 1]?.every(cell => !cell)) {
-        data.pop();
-      }
-
-      // If no data, show empty grid
-      if (data.length === 0) {
-        return { name: sheetName, data: [Array(10).fill("")] };
-      }
-
-      // Trim trailing empty columns
-      let maxCols = Math.max(...data.map(row => row.length));
-      let actualMaxCols = 0;
-      for (let col = 0; col < maxCols; col++) {
-        const hasValue = data.some(row => row[col]);
-        if (hasValue) actualMaxCols = col + 1;
-      }
-
-      // Normalize rows to have consistent column count
-      data = data.map(row => {
-        const normalized = [...row];
-        while (normalized.length < actualMaxCols) {
-          normalized.push("");
-        }
-        return normalized.slice(0, actualMaxCols);
-      });
-
-      // Security: Check sheet dimensions
-      if (data.length > MAX_ROWS) {
-        throw new Error(`Sheet "${sheetName}" exceeds maximum rows (${MAX_ROWS})`);
-      }
-      if (actualMaxCols > MAX_COLS) {
-        throw new Error(`Sheet "${sheetName}" exceeds maximum columns (${MAX_COLS})`);
-      }
-
-      return {
-        name: sheetName,
-        data: data.length ? data : [Array(10).fill("")],
-      };
-    });
+    const sheets = workbookToSheets(workbook);
 
     return NextResponse.json({ sheets });
   } catch (error) {
@@ -291,9 +311,13 @@ export async function POST(req: NextRequest, { params }: Params) {
       return NextResponse.json({ error: "Not an Excel file" }, { status: 400 });
     }
 
-    // Read original file BEFORE deleting to preserve formatting and styling
+    // Read original file BEFORE deleting to preserve formatting and styling.
+    // The loaded workbook itself becomes the base we write back out (mutated
+    // in place) — every sheet, style, and workbook-level property we don't
+    // explicitly touch below survives untouched, which is a lot simpler (and
+    // more complete) than manually copying properties field by field.
     const bucket = await getBucket();
-    let originalWorkbook: XLSX.WorkBook | null = null;
+    let originalWorkbook: ExcelJS.Workbook | null = null;
     let oldSheets: Sheet[] = [];
     let styleWarning = false;
 
@@ -304,118 +328,47 @@ export async function POST(req: NextRequest, { params }: Params) {
         chunks.push(chunk);
       }
       const originalBuffer = Buffer.concat(chunks);
-      originalWorkbook = XLSX.read(originalBuffer, { type: "buffer" });
-
-      // Extract old sheets data for change tracking
-      oldSheets = originalWorkbook.SheetNames.map((sheetName) => {
-        const worksheet = originalWorkbook!.Sheets[sheetName];
-        if (!worksheet) {
-          return { name: sheetName, data: [Array(10).fill("")] };
-        }
-        let data = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as string[][];
-
-        // Trim trailing empty rows
-        while (data.length > 0 && data[data.length - 1]?.every(cell => !cell)) {
-          data.pop();
-        }
-
-        if (data.length === 0) {
-          return { name: sheetName, data: [Array(10).fill("")] };
-        }
-
-        // Trim trailing empty columns
-        let maxCols = Math.max(...data.map(row => row.length));
-        let actualMaxCols = 0;
-        for (let col = 0; col < maxCols; col++) {
-          const hasValue = data.some(row => row[col]);
-          if (hasValue) actualMaxCols = col + 1;
-        }
-
-        // Normalize rows
-        data = data.map(row => {
-          const normalized = [...row];
-          while (normalized.length < actualMaxCols) {
-            normalized.push("");
-          }
-          return normalized.slice(0, actualMaxCols);
-        });
-
-        return {
-          name: sheetName,
-          data: data.length ? data : [Array(10).fill("")],
-        };
-      });
+      originalWorkbook = await loadWorkbook(originalBuffer);
+      oldSheets = workbookToSheets(originalWorkbook);
     } catch (err) {
       console.warn("Could not read original file for styling preservation:", err);
       styleWarning = true;
+      originalWorkbook = null;
     }
 
-    // Update sheets with new data while preserving original formatting
-    const workbook = XLSX.utils.book_new();
-    sheets.forEach((sheet: { name: string; data: string[][] }) => {
-      // Find original sheet to copy formatting
-      const originalSheet = originalWorkbook?.Sheets[sheet.name];
+    const outputWorkbook = originalWorkbook ?? new ExcelJS.Workbook();
 
-      if (originalSheet) {
-        // Start with a deep copy of the entire original sheet to preserve ALL formatting
-        const newWorksheet: any = {};
-
-        // Copy ALL cells and properties from original sheet first
-        Object.keys(originalSheet).forEach((key) => {
-          if (key.startsWith("!")) {
-            // Copy metadata (merges, column widths, row heights, etc)
-            newWorksheet[key] = JSON.parse(JSON.stringify(originalSheet[key]));
-          } else {
-            // Copy all cells from original (including formatting, colors, fonts, etc)
-            newWorksheet[key] = originalSheet[key];
-          }
-        });
-
-        // Now update ONLY the cell values with new data while keeping all original formatting
-        sheet.data.forEach((row, rowIdx) => {
-          row.forEach((value, colIdx) => {
-            const cellAddress = getCellAddress(rowIdx, colIdx);
-
-            // Get original cell to preserve ALL its properties (style, format, etc)
-            const originalCell = newWorksheet[cellAddress];
-
-            if (originalCell) {
-              // Update value but keep everything else (style, format, type, etc)
-              if (value === "") {
-                // For empty cells, remove the value but keep the style
-                delete originalCell.v;
-              } else {
-                originalCell.v = value;
-                originalCell.t = "s";
-              }
-            } else {
-              // New cell without original formatting
-              if (value !== "") {
-                newWorksheet[cellAddress] = {
-                  v: value,
-                  t: "s",
-                };
-              }
-            }
-          });
-        });
-
-        // Ensure we have the required range property
-        if (!newWorksheet["!ref"]) {
-          const maxCol = Math.max(...sheet.data.map(row => row.length));
-          const maxColLetter = maxCol > 0 ? getColumnLetter(maxCol - 1) : "A";
-          newWorksheet["!ref"] = `A1:${maxColLetter}${Math.max(sheet.data.length, 1)}`;
-        }
-
-        XLSX.utils.book_append_sheet(workbook, newWorksheet, sheet.name);
-      } else {
-        // Sheet doesn't exist in original, create new one
-        const worksheet = XLSX.utils.aoa_to_sheet(sheet.data);
-        XLSX.utils.book_append_sheet(workbook, worksheet, sheet.name);
+    // Original sheets keep their position across a rename (the editor never
+    // reorders or deletes sheets — only "clone" appends one), so matching by
+    // index rather than by name is what lets a renamed sheet keep its
+    // original formatting instead of looking like a brand-new sheet.
+    if (originalWorkbook) {
+      while (outputWorkbook.worksheets.length > sheets.length) {
+        const extra = outputWorkbook.worksheets[outputWorkbook.worksheets.length - 1]!;
+        outputWorkbook.removeWorksheet(extra.name);
       }
+    }
+
+    sheets.forEach((sheet, idx) => {
+      let worksheet = outputWorkbook.worksheets[idx];
+      if (worksheet) {
+        worksheet.name = sheet.name;
+      } else {
+        // New sheet (cloned client-side) — no original to copy formatting from.
+        worksheet = outputWorkbook.addWorksheet(sheet.name);
+      }
+
+      sheet.data.forEach((row, rowIdx) => {
+        row.forEach((value, colIdx) => {
+          const cell = worksheet.getCell(rowIdx + 1, colIdx + 1);
+          // Clear the value but keep the cell's style — matches how a
+          // spreadsheet normally treats "delete contents" vs. "clear all".
+          cell.value = value === "" ? null : value;
+        });
+      });
     });
 
-    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    const buffer = Buffer.from(await outputWorkbook.xlsx.writeBuffer());
 
     // Security: Check resulting file size
     if (buffer.length > MAX_FILE_SIZE) {
