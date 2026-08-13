@@ -3,6 +3,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Save, RotateCcw, MoreVertical, ChevronDown, Eye, Download, Copy, Edit2 } from "lucide-react";
 
+interface CellPos {
+  row: number;
+  col: number;
+}
+
 interface Sheet {
   name: string;
   data: string[][];
@@ -46,6 +51,10 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
   const [rowHeights, setRowHeights] = useState<Record<number, number>>({});
   const [tableHeight, setTableHeight] = useState(DEFAULT_TABLE_HEIGHT);
+  // Which cell the formula bar reflects/edits — a fixed-width column can
+  // truncate a cell's text, so the formula bar is the reliable way to see
+  // (and edit) the full value regardless of how narrow the column is.
+  const [activeCell, setActiveCell] = useState<CellPos | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const activeResizeCleanup = useRef<(() => void) | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -355,7 +364,10 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                   />
                 ) : (
                   <button
-                    onClick={() => setActiveSheet(idx)}
+                    onClick={() => {
+                      setActiveSheet(idx);
+                      setActiveCell(null);
+                    }}
                     onDoubleClick={() => !readOnly && setEditingSheetName(idx)}
                     className="flex items-center gap-1 px-3 py-2 text-sm font-medium"
                     title={readOnly ? undefined : "Double-click to rename"}
@@ -447,6 +459,23 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
         </div>
       </div>
 
+      {/* Formula bar: a narrow/fixed column can truncate a cell's text in the
+          grid below, so this always shows (and lets you edit) the full value
+          of whichever cell is focused, regardless of column width. */}
+      <div className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-zinc-50 px-3 py-2">
+        <span className="w-14 shrink-0 text-center text-xs font-semibold text-[var(--color-muted)]">
+          {activeCell ? `${getColumnHeader(activeCell.col)}${activeCell.row + 1}` : ""}
+        </span>
+        <input
+          type="text"
+          value={activeCell ? currentSheet.data[activeCell.row]?.[activeCell.col] ?? "" : ""}
+          onChange={(e) => activeCell && handleCellChange(activeCell.row, activeCell.col, e.target.value)}
+          readOnly={readOnly || !activeCell}
+          placeholder={activeCell ? "empty" : "Click a cell to see its full content here"}
+          className="w-full rounded border border-[var(--color-border)] bg-white px-2 py-1.5 text-sm outline-none placeholder:text-gray-300 focus-visible:border-[var(--color-accent)] read-only:bg-zinc-100"
+        />
+      </div>
+
       <div
         ref={scrollContainerRef}
         style={{ height: `${tableHeight}px`, minHeight: `${MIN_TABLE_HEIGHT}px` }}
@@ -515,8 +544,10 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                       type="text"
                       value={cell ?? ""}
                       onChange={(e) => handleCellChange(rowIdx, colIdx, e.target.value)}
+                      onFocus={() => setActiveCell({ row: rowIdx, col: colIdx })}
                       readOnly={readOnly}
                       placeholder={(cell === "" || cell === null) ? "empty" : undefined}
+                      title={cell || undefined}
                       className={`w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 ${readOnly ? "cursor-default" : "focus:border-[var(--color-accent)] focus:bg-white focus:ring-1 focus:ring-offset-0"}`}
                     />
                   </td>
