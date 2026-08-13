@@ -22,6 +22,16 @@ interface Params {
 // (resizable, maxByteLength, ...) than a real Node Buffer actually has — a known
 // upstream typing gap, not a real runtime mismatch (a real Buffer works fine here).
 async function loadWorkbook(buffer: Buffer): Promise<ExcelJS.Workbook> {
+  // exceljs only reads the modern zip-based .xlsx format, not the legacy
+  // binary .xls format (OLE Compound File signature D0 CF 11 E0 A1 B1 1A E1)
+  // that the old xlsx library used to read transparently. Detect it up
+  // front and say so plainly, instead of letting a generic "not a valid
+  // zip file" parse error surface (or, worse, silently show an empty grid).
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]))) {
+    throw new Error(
+      "This file is in the older .xls format, which the Excel editor can't open. Re-save it as .xlsx (in Excel: File > Save As > Excel Workbook) and re-upload."
+    );
+  }
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer as unknown as ArrayBuffer);
   return workbook;
@@ -53,17 +63,15 @@ const MAX_SHEETS = 50;
 // previous content in POST for change-tracking, so the two can't drift.
 function workbookToSheets(workbook: ExcelJS.Workbook): Sheet[] {
   return workbook.worksheets.map((worksheet) => {
-    // Fail fast on a workbook that's oversized before materializing any
-    // arrays — actualRowCount/columnCount reflect genuinely populated
-    // cells (unlike a stale declared range), so this can't be defeated by
-    // a file that just claims a huge range without real content in it.
-    if (worksheet.rowCount > MAX_ROWS) {
-      throw new Error(`Sheet "${worksheet.name}" exceeds maximum rows (${MAX_ROWS})`);
-    }
-    if (worksheet.columnCount > MAX_COLS) {
-      throw new Error(`Sheet "${worksheet.name}" exceeds maximum columns (${MAX_COLS})`);
-    }
-
+    // Deliberately NOT pre-checking worksheet.rowCount/columnCount against
+    // MAX_ROWS/MAX_COLS here: those getters reflect the highest row/column
+    // that has *any* cell record, including cells that only carry styling
+    // (e.g. borders or fill applied across a wide "just in case" range,
+    // very common in real-world spreadsheets) with no actual value — a tiny
+    // 2-row table can easily report rowCount in the thousands that way.
+    // Checking real size only after trimming (below, same as the limit
+    // check further down) is what actually reflects the data being sent
+    // to the client, and matches how this worked before this rewrite.
     let data: string[][] = [];
     for (let r = 1; r <= worksheet.rowCount; r++) {
       const row = worksheet.getRow(r);
@@ -89,6 +97,15 @@ function workbookToSheets(workbook: ExcelJS.Workbook): Sheet[] {
     for (let col = 0; col < maxCols; col++) {
       const hasValue = data.some((row) => row[col]);
       if (hasValue) actualMaxCols = col + 1;
+    }
+
+    // Security: check dimensions of the actual (trimmed) content, not the
+    // raw declared range — see the comment above.
+    if (data.length > MAX_ROWS) {
+      throw new Error(`Sheet "${worksheet.name}" exceeds maximum rows (${MAX_ROWS})`);
+    }
+    if (actualMaxCols > MAX_COLS) {
+      throw new Error(`Sheet "${worksheet.name}" exceeds maximum columns (${MAX_COLS})`);
     }
 
     // Normalize rows to have consistent column count
