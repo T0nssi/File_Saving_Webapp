@@ -14,6 +14,11 @@ interface Props {
   onDelete: (id: string) => void;
   onPreview: (file: FileDoc) => void;
   onMove: (id: string, folderId: string | null) => void;
+  // Selection checkbox (used for bulk actions like tag editing) is opt-in —
+  // only rendered when the parent wires it up, since edit access is
+  // required to select a file for a bulk edit.
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
 }
 
 // Walks the folder's parentId chain using the already-fetched flat folder
@@ -36,7 +41,7 @@ function folderPath(folderId: string | null, folders: FolderDoc[]): string {
   return parts.length > 0 ? parts.join(" / ") : "ยังไม่จัดหมวด";
 }
 
-export default function FileCard({ file, folders, onDelete, onPreview, onMove }: Props) {
+export default function FileCard({ file, folders, onDelete, onPreview, onMove, selected, onToggleSelect }: Props) {
   const [showShare, setShowShare] = useState(false);
   const kind = getFileKind(file.mimeType, file.filename);
   const isExcel = kind === "excel";
@@ -55,8 +60,24 @@ export default function FileCard({ file, folders, onDelete, onPreview, onMove }:
         e.dataTransfer.setData("text/plain", file._id);
         e.dataTransfer.effectAllowed = "move";
       }}
-      className={`group flex flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] ${canEdit ? "cursor-grab active:cursor-grabbing" : ""}`}
+      className={`group relative flex flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] ${
+        selected ? "ring-2 ring-[var(--color-accent)]" : ""
+      } ${canEdit ? "cursor-grab active:cursor-grabbing" : ""}`}
     >
+      {onToggleSelect && canEdit && (
+        <label
+          className="absolute left-2 top-2 z-10 flex h-5 w-5 items-center justify-center rounded bg-white/90 shadow"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            type="checkbox"
+            aria-label={`Select ${file.filename}`}
+            checked={!!selected}
+            onChange={() => onToggleSelect(file._id)}
+            className="h-3.5 w-3.5 cursor-pointer accent-[var(--color-accent)]"
+          />
+        </label>
+      )}
       <button
         type="button"
         onClick={() => onPreview(file)}

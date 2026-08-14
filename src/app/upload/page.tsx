@@ -565,9 +565,18 @@ export default function UploadPage() {
               <h2 className="flex items-center gap-2 text-lg font-semibold">
                 <Copy size={18} className="text-amber-600" /> พบไฟล์ชื่อซ้ำ
               </h2>
-              <p className="mt-1 text-sm text-[var(--color-muted)]">
-                พบ {dupPrompt.length} ไฟล์ที่ชื่อซ้ำกับไฟล์ในโฟลเดอร์ปลายทาง เลือกวิธีจัดการแต่ละไฟล์ก่อนอัปโหลด
-              </p>
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <p className="text-sm text-[var(--color-muted)]">
+                  พบ {dupPrompt.length} ไฟล์ที่ชื่อซ้ำกับไฟล์ในโฟลเดอร์ปลายทาง เลือกวิธีจัดการแต่ละไฟล์ก่อนอัปโหลด
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setDupPrompt((prev) => prev!.map((it) => ({ ...it, resolution: "skip" })))}
+                  className="shrink-0 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs font-medium hover:bg-zinc-50"
+                >
+                  ข้ามทั้งหมด
+                </button>
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto px-5 py-3">
