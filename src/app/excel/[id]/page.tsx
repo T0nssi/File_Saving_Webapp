@@ -4,7 +4,7 @@ import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, AlertTriangle, CheckCircle2, Clock, Download, Copy, Share2 } from "lucide-react";
-import ExcelEditor from "@/components/ExcelEditor";
+import ExcelEditor, { type StructuralOp } from "@/components/ExcelEditor";
 import ShareDialog from "@/components/ShareDialog";
 import SaveAsDialog from "@/components/SaveAsDialog";
 import { apiFetch } from "@/lib/apiFetch";
@@ -130,7 +130,7 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
     }
   }
 
-  async function handleSave(newSheets: Sheet[]): Promise<boolean> {
+  async function handleSave(newSheets: Sheet[], structuralOps: StructuralOp[]): Promise<boolean> {
     setSaving(true);
     setSaved(false);
     setError(null);
@@ -138,7 +138,7 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
       const res = await apiFetch(`/api/files/${id}/excel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sheets: newSheets }),
+        body: JSON.stringify({ sheets: newSheets, structuralOps }),
       });
       const data = await res.json();
       if (!res.ok) {
