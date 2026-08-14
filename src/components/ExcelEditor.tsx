@@ -31,6 +31,16 @@ const DEFAULT_ROW_HEIGHT = 36;
 const DEFAULT_TABLE_HEIGHT = 480;
 const MIN_TABLE_HEIGHT = 160;
 
+// Rough per-character/line-height estimates for the text-sm font this grid
+// renders with — good enough for an "auto-fit" quality-of-life feature,
+// same ballpark of approximation Excel's own AutoFit uses.
+const AUTOFIT_CHAR_PX = 7;
+const AUTOFIT_MIN_COL_WIDTH = 60;
+const AUTOFIT_MAX_COL_WIDTH = 320;
+const AUTOFIT_LINE_PX = 18;
+const AUTOFIT_ROW_PADDING_PX = 16;
+const AUTOFIT_MAX_ROW_HEIGHT = 160;
+
 function columnWidthsStorageKey(fileId: string) {
   return `excel-editor:col-widths:${fileId}`;
 }
@@ -164,6 +174,52 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     );
     setSheets(newSheets);
     pushHistory(newSheets);
+  };
+
+  // Widens every column to roughly fit its longest cell's text — the direct
+  // fix for "column is too narrow to see the data" beyond what the formula
+  // bar and per-column drag-resize already offer.
+  const autoFitColumns = () => {
+    const colCount = currentSheet.data[0]?.length ?? 0;
+    const next: Record<number, number> = {};
+    for (let c = 0; c < colCount; c++) {
+      let maxLen = getColumnHeader(c).length;
+      for (const row of currentSheet.data) {
+        const len = (row[c] ?? "").length;
+        if (len > maxLen) maxLen = len;
+      }
+      next[c] = Math.min(AUTOFIT_MAX_COL_WIDTH, Math.max(AUTOFIT_MIN_COL_WIDTH, maxLen * AUTOFIT_CHAR_PX + 24));
+    }
+    setColumnWidths(next);
+    try {
+      window.localStorage.setItem(columnWidthsStorageKey(fileId), JSON.stringify(next));
+    } catch {
+      // Ignore storage failures (quota, privacy mode, etc.)
+    }
+  };
+
+  // Tall enough for each row's longest-wrapping cell to actually show all
+  // its lines, given the (possibly just auto-fit) column widths — cells wrap
+  // now (see the textarea below), so this is the height half of "see all
+  // data" the formula bar alone doesn't cover.
+  const autoFitRows = () => {
+    const next: Record<number, number> = {};
+    currentSheet.data.forEach((row, r) => {
+      let maxLines = 1;
+      row.forEach((cell, c) => {
+        const width = columnWidths[c] || DEFAULT_COL_WIDTH;
+        const charsPerLine = Math.max(1, Math.floor((width - 16) / AUTOFIT_CHAR_PX));
+        const lines = Math.max(1, Math.ceil((cell?.length ?? 0) / charsPerLine));
+        if (lines > maxLines) maxLines = lines;
+      });
+      next[r] = Math.min(AUTOFIT_MAX_ROW_HEIGHT, Math.max(DEFAULT_ROW_HEIGHT, maxLines * AUTOFIT_LINE_PX + AUTOFIT_ROW_PADDING_PX));
+    });
+    setRowHeights(next);
+    try {
+      window.localStorage.setItem(rowHeightsStorageKey(fileId), JSON.stringify(next));
+    } catch {
+      // Ignore storage failures (quota, privacy mode, etc.)
+    }
   };
 
   const undo = () => {
@@ -434,6 +490,27 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                   <div className="border-t border-[var(--color-border)]" />
                   <button
                     onClick={() => {
+                      autoFitColumns();
+                      setShowMenu(false);
+                    }}
+                    className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                    title="Widen every column to fit its longest value"
+                  >
+                    Auto-fit column width
+                  </button>
+                  <button
+                    onClick={() => {
+                      autoFitRows();
+                      setShowMenu(false);
+                    }}
+                    className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                    title="Grow rows tall enough to show wrapped cell text"
+                  >
+                    Auto-fit row height
+                  </button>
+                  <div className="border-t border-[var(--color-border)]" />
+                  <button
+                    onClick={() => {
                       cloneSheet();
                       setShowMenu(false);
                     }}
@@ -540,14 +617,15 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                     }}
                     className="border-r border-[var(--color-border)] px-3 py-2 overflow-hidden"
                   >
-                    <input
-                      type="text"
+                    <textarea
+                      rows={1}
                       value={cell ?? ""}
                       onChange={(e) => handleCellChange(rowIdx, colIdx, e.target.value)}
                       onFocus={() => setActiveCell({ row: rowIdx, col: colIdx })}
                       readOnly={readOnly}
                       placeholder={(cell === "" || cell === null) ? "empty" : undefined}
                       title={cell || undefined}
+                      style={{ height: "100%", resize: "none" }}
                       className={`w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 ${readOnly ? "cursor-default" : "focus:border-[var(--color-accent)] focus:bg-white focus:ring-1 focus:ring-offset-0"}`}
                     />
                   </td>
