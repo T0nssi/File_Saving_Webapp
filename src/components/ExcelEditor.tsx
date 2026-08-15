@@ -85,8 +85,33 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   const menuRef = useRef<HTMLDivElement>(null);
   const activeResizeCleanup = useRef<(() => void) | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const tbodyRef = useRef<HTMLTableSectionElement>(null);
 
   const currentSheet = sheets[activeSheet] ?? { name: "", data: [] };
+
+  // Grows a single cell's textarea to fit its current content — called as
+  // content is typed, so a row wanting more lines expands immediately
+  // instead of only on an explicit "Auto-fit" click. Resetting to "auto"
+  // first is required: scrollHeight only reports a value bigger than the
+  // current height, never smaller, so without it a row could grow but never
+  // shrink back down as text is deleted.
+  function autoResizeCell(e: React.FormEvent<HTMLTextAreaElement>) {
+    const el = e.currentTarget;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }
+
+  // Same resize, applied to every cell at once — covers the cases typing
+  // alone doesn't: initial load, switching sheets, undo, and restoring a
+  // revision, none of which fire a textarea's input event.
+  useEffect(() => {
+    const container = tbodyRef.current;
+    if (!container) return;
+    container.querySelectorAll("textarea").forEach((el) => {
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    });
+  }, [currentSheet.data]);
 
   // `newOps` is only passed by insertRowAbove/insertColumnLeft, which are
   // the only edits that change the structural-op list; every other edit
@@ -659,7 +684,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
               ))}
             </tr>
           </thead>
-          <tbody>
+          <tbody ref={tbodyRef}>
             {currentSheet.data.map((row, rowIdx) => (
               <tr
                 key={rowIdx}
@@ -703,11 +728,12 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                       rows={1}
                       value={cell ?? ""}
                       onChange={(e) => handleCellChange(rowIdx, colIdx, e.target.value)}
+                      onInput={autoResizeCell}
                       onFocus={() => setActiveCell({ row: rowIdx, col: colIdx })}
                       readOnly={readOnly}
                       placeholder={(cell === "" || cell === null) ? "empty" : undefined}
                       title={cell || undefined}
-                      style={{ height: "100%", resize: "none" }}
+                      style={{ minHeight: "20px", resize: "none" }}
                       className={`w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 ${readOnly ? "cursor-default" : "focus:border-[var(--color-accent)] focus:bg-white focus:ring-1 focus:ring-offset-0"}`}
                     />
                   </td>
