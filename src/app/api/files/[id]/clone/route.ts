@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbConnect } from "@/lib/mongodb";
 import FileModel from "@/models/File";
+import FolderModel from "@/models/Folder";
 import { requireUser } from "@/lib/session";
 import { canView, ensureFileOwnersBackfilled } from "@/lib/filePermissions";
 import { getBucket } from "@/lib/gridfs";
+import { isValidObjectId } from "@/lib/validation";
 import { Readable } from "stream";
 import type mongoose from "mongoose";
 
@@ -17,7 +19,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { id } = await params;
-    const { newFilename } = await req.json();
+    const { newFilename, folderId: requestedFolderId } = await req.json();
 
     if (!newFilename || typeof newFilename !== "string") {
       return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
@@ -31,6 +33,24 @@ export async function POST(req: NextRequest, { params }: Params) {
       // Same response whether the file is missing or just inaccessible —
       // don't reveal that a file a requester can't see exists at all.
       return NextResponse.json({ error: "File not found" }, { status: 404 });
+    }
+
+    // Defaults to the source file's own folder (previous behavior) when the
+    // caller doesn't pick a destination; folders are a shared namespace (see
+    // filePermissions.ts), so any existing folder id is a valid target.
+    let destFolderId: string | null = sourceFile.folderId ? sourceFile.folderId.toString() : null;
+    if (requestedFolderId !== undefined) {
+      if (requestedFolderId === null) {
+        destFolderId = null;
+      } else if (typeof requestedFolderId === "string" && isValidObjectId(requestedFolderId)) {
+        const target = await FolderModel.findById(requestedFolderId).select("_id").lean();
+        if (!target) {
+          return NextResponse.json({ error: "Destination folder not found" }, { status: 404 });
+        }
+        destFolderId = requestedFolderId;
+      } else {
+        return NextResponse.json({ error: "Invalid folder id" }, { status: 400 });
+      }
     }
 
     const bucket = await getBucket();
@@ -71,7 +91,7 @@ export async function POST(req: NextRequest, { params }: Params) {
         gridFsId: uploadedId,
         tags: sourceFile.tags,
         description: `Copy of ${sourceFile.filename}`,
-        folderId: sourceFile.folderId,
+        folderId: destFolderId,
         uploadedBy: requester.username,
         ownerId: requester.id,
         sourceFileId: masterFileId,

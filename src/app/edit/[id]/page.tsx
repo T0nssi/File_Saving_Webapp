@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import TagInput from "@/components/TagInput";
 import ShareDialog from "@/components/ShareDialog";
+import SaveAsDialog from "@/components/SaveAsDialog";
 import { apiFetch } from "@/lib/apiFetch";
 import { getFileKind } from "@/lib/fileKind";
 import type { FileDoc, RevisionDoc, TagCount } from "@/types";
@@ -41,7 +42,6 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
   const [revisionsWarning, setRevisionsWarning] = useState<string | null>(null);
   const [showRevisions, setShowRevisions] = useState(false);
   const [showCloneDialog, setShowCloneDialog] = useState(false);
-  const [cloneFilename, setCloneFilename] = useState("");
   const [replacing, setReplacing] = useState(false);
   const [imgVersion, setImgVersion] = useState(0);
 
@@ -107,32 +107,6 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
       } else {
         setSaved(true);
         setTimeout(() => setSaved(false), 2000);
-      }
-    } catch {
-      setError("Network error — is the server running?");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleClone() {
-    if (!cloneFilename.trim()) {
-      setError("Filename cannot be empty");
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await apiFetch(`/api/files/${id}/clone`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ newFilename: cloneFilename.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error ?? "Clone failed");
-      } else {
-        router.push(`/edit/${data.file._id}`);
       }
     } catch {
       setError("Network error — is the server running?");
@@ -281,13 +255,7 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
         </a>
         <button
           type="button"
-          onClick={() => {
-            const dot = file.filename.lastIndexOf(".");
-            const base = dot > 0 ? file.filename.slice(0, dot) : file.filename;
-            const ext = dot > 0 ? file.filename.slice(dot) : "";
-            setCloneFilename(`${base} (copy)${ext}`);
-            setShowCloneDialog(true);
-          }}
+          onClick={() => setShowCloneDialog(true)}
           className="flex items-center gap-2 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-zinc-50"
         >
           <Copy size={16} /> Save As
@@ -331,38 +299,18 @@ export default function EditPage({ params }: { params: Promise<{ id: string }> }
       )}
 
       {showCloneDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
-          <div className="w-96 rounded-lg border border-[var(--color-border)] bg-white p-6 shadow-lg">
-            <h2 className="mb-4 text-lg font-semibold">Save File As</h2>
-            <input
-              type="text"
-              value={cloneFilename}
-              onChange={(e) => setCloneFilename(e.target.value)}
-              placeholder="New filename"
-              className="mb-4 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus-visible:border-[var(--color-accent)]"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleClone();
-                if (e.key === "Escape") setShowCloneDialog(false);
-              }}
-              autoFocus
-            />
-            <div className="flex gap-2">
-              <button
-                onClick={handleClone}
-                disabled={saving}
-                className="flex-1 rounded-md bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-60"
-              >
-                {saving ? "Creating..." : "Create Copy"}
-              </button>
-              <button
-                onClick={() => setShowCloneDialog(false)}
-                className="flex-1 rounded-md border border-[var(--color-border)] px-4 py-2 text-sm font-medium hover:bg-zinc-50"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
+        <SaveAsDialog
+          fileId={id}
+          defaultFilename={(() => {
+            const dot = file.filename.lastIndexOf(".");
+            const base = dot > 0 ? file.filename.slice(0, dot) : file.filename;
+            const ext = dot > 0 ? file.filename.slice(dot) : "";
+            return `${base} (copy)${ext}`;
+          })()}
+          currentFolderId={file.folderId}
+          redirectPrefix="/edit"
+          onClose={() => setShowCloneDialog(false)}
+        />
       )}
 
       {showRevisions && (

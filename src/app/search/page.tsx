@@ -2,11 +2,12 @@
 
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
-import { Search as SearchIcon, Download, X, FileText, FileBox } from "lucide-react";
+import { Search as SearchIcon, Download, X, FileText, FileBox, Tag, CheckCircle2 } from "lucide-react";
 import FileCard from "@/components/FileCard";
 import FolderSidebar from "@/components/FolderSidebar";
 import FolderGrid from "@/components/FolderGrid";
 import StoragePanel from "@/components/StoragePanel";
+import BulkTagDialog from "@/components/BulkTagDialog";
 import { ConfirmModal } from "@/components/Dialog";
 import { getCachedSearch, setCachedSearch } from "@/lib/searchCache";
 import { apiFetch } from "@/lib/apiFetch";
@@ -46,6 +47,9 @@ function SearchPageInner() {
   const [preview, setPreview] = useState<FileDoc | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showBulkTags, setShowBulkTags] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{ updated: number; skipped: number } | null>(null);
 
   useEffect(() => {
     apiFetch("/api/auth/me")
@@ -166,6 +170,22 @@ function SearchPageInner() {
     return () => clearInterval(interval);
   }, [fetchFiles]);
 
+  // A stale selection referencing files no longer on screen (folder change,
+  // new search, page change) is confusing more than useful — clear it
+  // whenever the visible set changes rather than trying to reconcile it.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [cacheKey]);
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   function handleDelete(id: string) {
     const name = data?.items.find((f) => f._id === id)?.filename ?? "ไฟล์นี้";
     setDeleteTarget({ id, name });
@@ -281,6 +301,35 @@ function SearchPageInner() {
             </div>
           </div>
 
+          {selectedIds.size > 0 && (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-[var(--color-border)] bg-blue-50 px-3 py-2 text-sm">
+              <span className="font-medium text-[var(--color-accent)]">{selectedIds.size} เลือกแล้ว</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowBulkTags(true)}
+                  className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium hover:bg-zinc-50"
+                >
+                  <Tag size={13} /> แก้ไขแท็ก
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedIds(new Set())}
+                  className="rounded-md border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs font-medium hover:bg-zinc-50"
+                >
+                  ยกเลิกการเลือก
+                </button>
+              </div>
+            </div>
+          )}
+
+          {bulkResult && (
+            <div className="flex items-center gap-2 rounded-md bg-green-50 px-3 py-2 text-sm text-green-700">
+              <CheckCircle2 size={16} /> อัปเดตแท็ก {bulkResult.updated} ไฟล์
+              {bulkResult.skipped > 0 && ` (ข้าม ${bulkResult.skipped} ไฟล์ที่ไม่มีสิทธิ์แก้ไข)`}
+            </div>
+          )}
+
           {loading && <p className="text-sm text-[var(--color-muted)]">Loading…</p>}
 
           {!loading && data && data.items.length === 0 && (
@@ -295,6 +344,8 @@ function SearchPageInner() {
                 <FileCard
                   key={f._id}
                   file={f}
+                  selected={selectedIds.has(f._id)}
+                  onToggleSelect={toggleSelect}
                   folders={flatFolders}
                   onDelete={handleDelete}
                   onPreview={setPreview}
@@ -403,6 +454,21 @@ function SearchPageInner() {
           confirmLabel="ลบไฟล์"
           onConfirm={confirmDeleteFile}
           onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+      {showBulkTags && (
+        <BulkTagDialog
+          fileIds={[...selectedIds]}
+          suggestions={tagsList.map((t) => t.tag)}
+          onClose={() => setShowBulkTags(false)}
+          onDone={(result) => {
+            setShowBulkTags(false);
+            setSelectedIds(new Set());
+            setBulkResult(result);
+            setTimeout(() => setBulkResult(null), 4000);
+            fetchFiles();
+            setFoldersRefreshKey((k) => k + 1);
+          }}
         />
       )}
     </div>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Save, RotateCcw, MoreVertical, ChevronDown, Eye, Download, Copy, Edit2 } from "lucide-react";
+import { Save, RotateCcw, MoreVertical, ChevronDown, Eye, Download, Copy, Edit2, Plus } from "lucide-react";
 
 interface CellPos {
   row: number;
@@ -13,10 +13,26 @@ interface Sheet {
   data: string[][];
 }
 
+// A row/column inserted at a specific position (not appended) needs the
+// server to physically shift the *original* file's rows/columns — including
+// their styling — via exceljs's spliceRows/spliceColumns, rather than just
+// rewriting cell values positionally (see excel/route.ts). Recorded in the
+// exact order performed so the server can replay them the same way.
+export interface StructuralOp {
+  type: "row" | "col";
+  sheetIndex: number;
+  position: number;
+}
+
+interface HistoryEntry {
+  sheets: Sheet[];
+  ops: StructuralOp[];
+}
+
 interface ExcelEditorProps {
   fileId: string;
   filename: string;
-  onSave: (sheets: Sheet[]) => Promise<boolean>;
+  onSave: (sheets: Sheet[], structuralOps: StructuralOp[]) => Promise<boolean>;
   initialSheets: Sheet[];
   saving: boolean;
   // True when the viewer only has "view" share access — the server rejects
@@ -31,6 +47,16 @@ const DEFAULT_ROW_HEIGHT = 36;
 const DEFAULT_TABLE_HEIGHT = 480;
 const MIN_TABLE_HEIGHT = 160;
 
+// Rough per-character/line-height estimates for the text-sm font this grid
+// renders with — good enough for an "auto-fit" quality-of-life feature,
+// same ballpark of approximation Excel's own AutoFit uses.
+const AUTOFIT_CHAR_PX = 7;
+const AUTOFIT_MIN_COL_WIDTH = 60;
+const AUTOFIT_MAX_COL_WIDTH = 320;
+const AUTOFIT_LINE_PX = 18;
+const AUTOFIT_ROW_PADDING_PX = 16;
+const AUTOFIT_MAX_ROW_HEIGHT = 160;
+
 function columnWidthsStorageKey(fileId: string) {
   return `excel-editor:col-widths:${fileId}`;
 }
@@ -44,7 +70,8 @@ function tableHeightStorageKey(fileId: string) {
 export default function ExcelEditor({ fileId, filename, onSave, initialSheets, saving, readOnly = false }: ExcelEditorProps) {
   const [sheets, setSheets] = useState<Sheet[]>(initialSheets);
   const [activeSheet, setActiveSheet] = useState(0);
-  const [history, setHistory] = useState<Sheet[][]>([initialSheets]);
+  const [history, setHistory] = useState<HistoryEntry[]>([{ sheets: initialSheets, ops: [] }]);
+  const [structuralOps, setStructuralOps] = useState<StructuralOp[]>([]);
   const [showMenu, setShowMenu] = useState(false);
   const [editingSheetName, setEditingSheetName] = useState<number | null>(null);
   const [sheetNameError, setSheetNameError] = useState<string | null>(null);
@@ -61,12 +88,22 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
 
   const currentSheet = sheets[activeSheet] ?? { name: "", data: [] };
 
-  const pushHistory = useCallback((newSheets: Sheet[]) => {
-    setHistory((prev) => {
-      const next = [...prev, newSheets];
-      return next.length > MAX_HISTORY ? next.slice(next.length - MAX_HISTORY) : next;
-    });
-  }, []);
+  // `newOps` is only passed by insertRowAbove/insertColumnLeft, which are
+  // the only edits that change the structural-op list; every other edit
+  // (cell change, add row/col at the end, rename, clone) just carries the
+  // current ops forward unchanged into the new history entry, so undo can
+  // still pop them back off in lockstep with the sheet data.
+  const pushHistory = useCallback(
+    (newSheets: Sheet[], newOps?: StructuralOp[]) => {
+      const ops = newOps ?? structuralOps;
+      if (newOps) setStructuralOps(newOps);
+      setHistory((prev) => {
+        const next = [...prev, { sheets: newSheets, ops }];
+        return next.length > MAX_HISTORY ? next.slice(next.length - MAX_HISTORY) : next;
+      });
+    },
+    [structuralOps]
+  );
 
   // Load persisted column widths, row heights, and table height for this file
   useEffect(() => {
@@ -166,12 +203,89 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     pushHistory(newSheets);
   };
 
+  // Unlike addRow/addColumn (which only ever append at the end — a pure
+  // extension the save path already handles fine), inserting in the middle
+  // shifts every row/column after it. Locally that's just an array splice,
+  // but the server also needs to know to shift the *original* file's rows
+  // physically (styles included) via exceljs's spliceRows/spliceColumns —
+  // recorded here as a structural op sent alongside the sheet data on save.
+  const insertRowAbove = (rowIdx: number) => {
+    if (readOnly) return;
+    const newSheets = sheets.map((s, idx) =>
+      idx === activeSheet
+        ? { ...s, data: [...s.data.slice(0, rowIdx), Array(s.data[0]?.length ?? 10).fill(""), ...s.data.slice(rowIdx)] }
+        : s
+    );
+    const newOps: StructuralOp[] = [...structuralOps, { type: "row", sheetIndex: activeSheet, position: rowIdx }];
+    setSheets(newSheets);
+    pushHistory(newSheets, newOps);
+  };
+
+  const insertColumnLeft = (colIdx: number) => {
+    if (readOnly) return;
+    const newSheets = sheets.map((s, idx) =>
+      idx === activeSheet
+        ? { ...s, data: s.data.map((r) => [...r.slice(0, colIdx), "", ...r.slice(colIdx)]) }
+        : s
+    );
+    const newOps: StructuralOp[] = [...structuralOps, { type: "col", sheetIndex: activeSheet, position: colIdx }];
+    setSheets(newSheets);
+    pushHistory(newSheets, newOps);
+  };
+
+  // Widens every column to roughly fit its longest cell's text — the direct
+  // fix for "column is too narrow to see the data" beyond what the formula
+  // bar and per-column drag-resize already offer.
+  const autoFitColumns = () => {
+    const colCount = currentSheet.data[0]?.length ?? 0;
+    const next: Record<number, number> = {};
+    for (let c = 0; c < colCount; c++) {
+      let maxLen = getColumnHeader(c).length;
+      for (const row of currentSheet.data) {
+        const len = (row[c] ?? "").length;
+        if (len > maxLen) maxLen = len;
+      }
+      next[c] = Math.min(AUTOFIT_MAX_COL_WIDTH, Math.max(AUTOFIT_MIN_COL_WIDTH, maxLen * AUTOFIT_CHAR_PX + 24));
+    }
+    setColumnWidths(next);
+    try {
+      window.localStorage.setItem(columnWidthsStorageKey(fileId), JSON.stringify(next));
+    } catch {
+      // Ignore storage failures (quota, privacy mode, etc.)
+    }
+  };
+
+  // Tall enough for each row's longest-wrapping cell to actually show all
+  // its lines, given the (possibly just auto-fit) column widths — cells wrap
+  // now (see the textarea below), so this is the height half of "see all
+  // data" the formula bar alone doesn't cover.
+  const autoFitRows = () => {
+    const next: Record<number, number> = {};
+    currentSheet.data.forEach((row, r) => {
+      let maxLines = 1;
+      row.forEach((cell, c) => {
+        const width = columnWidths[c] || DEFAULT_COL_WIDTH;
+        const charsPerLine = Math.max(1, Math.floor((width - 16) / AUTOFIT_CHAR_PX));
+        const lines = Math.max(1, Math.ceil((cell?.length ?? 0) / charsPerLine));
+        if (lines > maxLines) maxLines = lines;
+      });
+      next[r] = Math.min(AUTOFIT_MAX_ROW_HEIGHT, Math.max(DEFAULT_ROW_HEIGHT, maxLines * AUTOFIT_LINE_PX + AUTOFIT_ROW_PADDING_PX));
+    });
+    setRowHeights(next);
+    try {
+      window.localStorage.setItem(rowHeightsStorageKey(fileId), JSON.stringify(next));
+    } catch {
+      // Ignore storage failures (quota, privacy mode, etc.)
+    }
+  };
+
   const undo = () => {
     if (history.length > 1) {
       const newHistory = history.slice(0, -1);
       const previousState = newHistory[newHistory.length - 1];
       if (previousState) {
-        setSheets(previousState);
+        setSheets(previousState.sheets);
+        setStructuralOps(previousState.ops);
         setHistory(newHistory);
       }
     }
@@ -179,13 +293,15 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
 
   const handleSave = useCallback(async () => {
     if (saving || readOnly) return;
-    const success = await onSave(sheets);
+    const success = await onSave(sheets, structuralOps);
     if (success) {
-      // Collapse history back to a single baseline so the dirty check and undo
-      // button both reflect "nothing to lose" right after a successful save.
-      setHistory([sheets]);
+      // Collapse history back to a single baseline (and clear the ops that
+      // just got applied) so the dirty check and undo button both reflect
+      // "nothing to lose" right after a successful save.
+      setHistory([{ sheets, ops: [] }]);
+      setStructuralOps([]);
     }
-  }, [onSave, sheets, saving, readOnly]);
+  }, [onSave, sheets, structuralOps, saving, readOnly]);
 
   // Ctrl+S / Cmd+S saves instead of triggering the browser's save-page dialog
   useEffect(() => {
@@ -434,6 +550,27 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                   <div className="border-t border-[var(--color-border)]" />
                   <button
                     onClick={() => {
+                      autoFitColumns();
+                      setShowMenu(false);
+                    }}
+                    className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                    title="Widen every column to fit its longest value"
+                  >
+                    Auto-fit column width
+                  </button>
+                  <button
+                    onClick={() => {
+                      autoFitRows();
+                      setShowMenu(false);
+                    }}
+                    className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                    title="Grow rows tall enough to show wrapped cell text"
+                  >
+                    Auto-fit row height
+                  </button>
+                  <div className="border-t border-[var(--color-border)]" />
+                  <button
+                    onClick={() => {
                       cloneSheet();
                       setShowMenu(false);
                     }}
@@ -494,9 +631,20 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                     width: columnWidths[colIdx] ? `${columnWidths[colIdx]}px` : "auto",
                     minWidth: "80px",
                   }}
-                  className="sticky top-0 z-10 relative border-r border-b border-[var(--color-border)] bg-zinc-100 px-3 py-2 text-center text-xs font-semibold text-[var(--color-muted)] select-none"
+                  className="group sticky top-0 z-10 relative border-r border-b border-[var(--color-border)] bg-zinc-100 px-3 py-2 text-center text-xs font-semibold text-[var(--color-muted)] select-none"
                 >
                   {getColumnHeader(colIdx)}
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      onClick={() => insertColumnLeft(colIdx)}
+                      title="Insert column to the left"
+                      aria-label={`Insert column before ${getColumnHeader(colIdx)}`}
+                      className="absolute left-0 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[var(--color-accent)] p-0.5 text-white opacity-0 transition-opacity hover:bg-[var(--color-accent-hover)] group-hover:opacity-100"
+                    >
+                      <Plus size={10} />
+                    </button>
+                  )}
                   {/* Resize handle */}
                   <div
                     onMouseDown={(e) => handleColResizeMouseDown(e, colIdx)}
@@ -518,8 +666,19 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                 style={rowHeights[rowIdx] ? { height: `${rowHeights[rowIdx]}px` } : undefined}
                 className="border-b border-[var(--color-border)] hover:bg-zinc-50"
               >
-                <td className="sticky left-0 z-[1] relative border-r border-[var(--color-border)] bg-zinc-50 px-2 py-2 text-center text-xs font-medium text-[var(--color-muted)]">
+                <td className="group sticky left-0 z-[1] relative border-r border-[var(--color-border)] bg-zinc-50 px-2 py-2 text-center text-xs font-medium text-[var(--color-muted)]">
                   {rowIdx + 1}
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      onClick={() => insertRowAbove(rowIdx)}
+                      title="Insert row above"
+                      aria-label={`Insert row above ${rowIdx + 1}`}
+                      className="absolute left-1/2 top-0 z-20 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[var(--color-accent)] p-0.5 text-white opacity-0 transition-opacity hover:bg-[var(--color-accent-hover)] group-hover:opacity-100"
+                    >
+                      <Plus size={10} />
+                    </button>
+                  )}
                   {/* Row resize handle */}
                   <div
                     onMouseDown={(e) => handleRowResizeMouseDown(e, rowIdx)}
@@ -540,14 +699,15 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
                     }}
                     className="border-r border-[var(--color-border)] px-3 py-2 overflow-hidden"
                   >
-                    <input
-                      type="text"
+                    <textarea
+                      rows={1}
                       value={cell ?? ""}
                       onChange={(e) => handleCellChange(rowIdx, colIdx, e.target.value)}
                       onFocus={() => setActiveCell({ row: rowIdx, col: colIdx })}
                       readOnly={readOnly}
                       placeholder={(cell === "" || cell === null) ? "empty" : undefined}
                       title={cell || undefined}
+                      style={{ height: "100%", resize: "none" }}
                       className={`w-full rounded border border-transparent bg-transparent px-1 py-1 outline-none placeholder:text-gray-300 ${readOnly ? "cursor-default" : "focus:border-[var(--color-accent)] focus:bg-white focus:ring-1 focus:ring-offset-0"}`}
                     />
                   </td>

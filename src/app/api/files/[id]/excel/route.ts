@@ -49,6 +49,14 @@ interface CellChange {
   newValue: string;
 }
 
+interface StructuralOp {
+  type: "row" | "col";
+  sheetIndex: number;
+  position: number;
+}
+
+const MAX_STRUCTURAL_OPS = 500;
+
 // Security constants — MAX_FILE_SIZE comes from lib/validation.ts (env-configurable
 // via MAX_EXCEL_FILE_SIZE_BYTES / MAX_FILE_SIZE_BYTES) so it isn't a second,
 // disconnected cap a file could clear on upload but then be unopenable here.
@@ -272,7 +280,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     if (!requester) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { id } = await params;
-    const { sheets: inputSheets } = await req.json();
+    const { sheets: inputSheets, structuralOps: rawOps } = await req.json();
 
     // Security: Validate sheets input
     if (!Array.isArray(inputSheets) || inputSheets.length === 0) {
@@ -319,6 +327,41 @@ export async function POST(req: NextRequest, { params }: Params) {
     } catch (err) {
       const message = err instanceof Error ? err.message : "Validation failed";
       return NextResponse.json({ error: message }, { status: 400 });
+    }
+
+    // Row/column inserts (as opposed to addRow/addColumn, which only ever
+    // append and need no special handling — see workbookToSheets/the write
+    // loop below) — each op says "physically shift everything from this
+    // position onward" on a specific sheet, applied in order further down.
+    let structuralOps: StructuralOp[] = [];
+    if (rawOps !== undefined) {
+      if (!Array.isArray(rawOps) || rawOps.length > MAX_STRUCTURAL_OPS) {
+        return NextResponse.json({ error: "Invalid structural operations" }, { status: 400 });
+      }
+      try {
+        structuralOps = rawOps.map((op: unknown) => {
+          if (
+            !op ||
+            typeof op !== "object" ||
+            ((op as { type?: unknown }).type !== "row" && (op as { type?: unknown }).type !== "col") ||
+            !Number.isInteger((op as { sheetIndex?: unknown }).sheetIndex) ||
+            !Number.isInteger((op as { position?: unknown }).position)
+          ) {
+            throw new Error("Invalid structural operation");
+          }
+          const typed = op as { type: "row" | "col"; sheetIndex: number; position: number };
+          if (typed.sheetIndex < 0 || typed.sheetIndex >= sheets.length) {
+            throw new Error("Invalid structural operation");
+          }
+          const maxPos = typed.type === "row" ? MAX_ROWS : MAX_COLS;
+          if (typed.position < 0 || typed.position > maxPos) {
+            throw new Error("Invalid structural operation");
+          }
+          return typed;
+        });
+      } catch {
+        return NextResponse.json({ error: "Invalid structural operations" }, { status: 400 });
+      }
     }
 
     // Duplicate sheet name check (case-insensitive, matches Excel's own rule)
@@ -385,7 +428,10 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
     }
 
-    sheets.forEach((sheet, idx) => {
+    // Match/rename/create every sheet first (positionally), before touching
+    // any cell — structural ops below need the right worksheet objects to
+    // already exist, and value-writing needs the ops already applied.
+    const worksheets = sheets.map((sheet, idx) => {
       let worksheet = outputWorkbook.worksheets[idx];
       if (worksheet) {
         worksheet.name = sheet.name;
@@ -393,7 +439,30 @@ export async function POST(req: NextRequest, { params }: Params) {
         // New sheet (cloned client-side) — no original to copy formatting from.
         worksheet = outputWorkbook.addWorksheet(sheet.name);
       }
+      return worksheet;
+    });
 
+    // Physically shift existing rows/columns (styles included) out of the
+    // way for each insert, in the same order the user performed them —
+    // exceljs's splice* moves formatting along with the cells, which is
+    // exactly what positional value-writing alone can't do for a mid-sheet
+    // insert (an append at the end needs none of this, see workbookToSheets).
+    for (const op of structuralOps) {
+      const worksheet = worksheets[op.sheetIndex];
+      if (!worksheet) continue; // already bounds-checked above; defensive only
+      // exceljs's splice*(start, count) is a no-op with zero inserts and zero
+      // deletes — it only shifts anything when nInserts - count !== 0, so an
+      // explicit empty-row/column placeholder is what actually makes this an
+      // insert instead of silently doing nothing.
+      if (op.type === "row") {
+        worksheet.spliceRows(op.position + 1, 0, []);
+      } else {
+        worksheet.spliceColumns(op.position + 1, 0, []);
+      }
+    }
+
+    sheets.forEach((sheet, idx) => {
+      const worksheet = worksheets[idx]!;
       sheet.data.forEach((row, rowIdx) => {
         row.forEach((value, colIdx) => {
           const cell = worksheet.getCell(rowIdx + 1, colIdx + 1);
