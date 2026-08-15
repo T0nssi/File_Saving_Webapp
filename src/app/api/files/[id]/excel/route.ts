@@ -57,6 +57,69 @@ interface StructuralOp {
 
 const MAX_STRUCTURAL_OPS = 500;
 
+// Parses "A1" -> { row: 1, col: 1 } (1-based, matching exceljs's own addressing).
+function parseCellAddr(addr: string): { row: number; col: number } {
+  const m = addr.match(/^([A-Z]+)(\d+)$/);
+  if (!m) throw new Error(`Unparseable cell address: ${addr}`);
+  let col = 0;
+  for (const ch of m[1]!) col = col * 26 + (ch.charCodeAt(0) - 64);
+  return { row: parseInt(m[2]!, 10), col };
+}
+
+function colLetters(n: number): string {
+  let s = "";
+  let num = n;
+  while (num > 0) {
+    const rem = (num - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    num = Math.floor((num - 1) / 26);
+  }
+  return s;
+}
+
+// Shifts (or, if the insertion point falls strictly inside the range,
+// expands) a merge range for a row/column inserted at `position` — mirrors
+// how a real spreadsheet treats an insert that lands inside vs. before an
+// existing merge.
+function shiftMergeRange(range: string, axis: "row" | "col", position: number): string {
+  const [a, b] = range.split(":");
+  const s = parseCellAddr(a!);
+  const e = parseCellAddr(b!);
+  const key = axis === "row" ? "row" : "col";
+  let ns = s[key];
+  let ne = e[key];
+  if (position <= s[key]) {
+    ns += 1;
+    ne += 1;
+  } else if (position <= e[key]) {
+    ne += 1;
+  }
+  const newS = { ...s, [key]: ns };
+  const newE = { ...e, [key]: ne };
+  return `${colLetters(newS.col)}${newS.row}:${colLetters(newE.col)}${newE.row}`;
+}
+
+// exceljs's spliceColumns (and, less predictably, spliceRows) mishandle
+// merged cells directly — verified spliceColumns can silently relocate a
+// cell's value to the wrong address entirely and leave the <mergeCells>
+// declaration stale, producing a file Excel's own strict parser rejects as
+// corrupt on open. Unmerging everything first removes the merge state that
+// confuses the splice, then the shifted/expanded ranges are recomputed and
+// reapplied manually afterward — full control, no dependence on exceljs's
+// internal (and here, buggy) merge-splice interaction.
+function safeSplice(worksheet: ExcelJS.Worksheet, type: "row" | "col", position: number): void {
+  const merges = [...worksheet.model.merges];
+  merges.forEach((range) => worksheet.unMergeCells(range));
+  if (type === "row") {
+    worksheet.spliceRows(position + 1, 0, []);
+  } else {
+    worksheet.spliceColumns(position + 1, 0, []);
+  }
+  merges.forEach((range) => {
+    worksheet.mergeCells(shiftMergeRange(range, type, position + 1));
+  });
+}
+
 // Security constants — MAX_FILE_SIZE comes from lib/validation.ts (env-configurable
 // via MAX_EXCEL_FILE_SIZE_BYTES / MAX_FILE_SIZE_BYTES) so it isn't a second,
 // disconnected cap a file could clear on upload but then be unopenable here.
@@ -442,23 +505,16 @@ export async function POST(req: NextRequest, { params }: Params) {
       return worksheet;
     });
 
-    // Physically shift existing rows/columns (styles included) out of the
-    // way for each insert, in the same order the user performed them —
-    // exceljs's splice* moves formatting along with the cells, which is
-    // exactly what positional value-writing alone can't do for a mid-sheet
-    // insert (an append at the end needs none of this, see workbookToSheets).
+    // Physically shift existing rows/columns (styles and merges included)
+    // out of the way for each insert, in the same order the user performed
+    // them — this is what positional value-writing alone can't do for a
+    // mid-sheet insert (an append at the end needs none of this, see
+    // workbookToSheets). Goes through safeSplice, not exceljs's spliceRows/
+    // spliceColumns directly — see that function for why.
     for (const op of structuralOps) {
       const worksheet = worksheets[op.sheetIndex];
       if (!worksheet) continue; // already bounds-checked above; defensive only
-      // exceljs's splice*(start, count) is a no-op with zero inserts and zero
-      // deletes — it only shifts anything when nInserts - count !== 0, so an
-      // explicit empty-row/column placeholder is what actually makes this an
-      // insert instead of silently doing nothing.
-      if (op.type === "row") {
-        worksheet.spliceRows(op.position + 1, 0, []);
-      } else {
-        worksheet.spliceColumns(op.position + 1, 0, []);
-      }
+      safeSplice(worksheet, op.type, op.position);
     }
 
     sheets.forEach((sheet, idx) => {
