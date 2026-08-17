@@ -147,6 +147,54 @@ function cellText(cell: ExcelJS.Cell): string {
   }
 }
 
+// A defined name's range is stored as a literal string like `Data!$A$1:$B$2`
+// or `'Laser Marking'!$A$1:$B$2` (quoted when the sheet name has spaces/
+// special characters). Replaces the leading sheet-name reference with
+// `newName` — preserving/adding quoting as needed — iff it currently
+// references `oldName`; otherwise returns the string unchanged.
+function replaceSheetNameInRange(rangeStr: string, oldName: string, newName: string): string {
+  const bangIdx = rangeStr.indexOf("!");
+  if (bangIdx === -1) return rangeStr;
+  const sheetRef = rangeStr.slice(0, bangIdx);
+  const rest = rangeStr.slice(bangIdx);
+  let bareName = sheetRef;
+  let quoted = false;
+  if (sheetRef.startsWith("'") && sheetRef.endsWith("'")) {
+    quoted = true;
+    bareName = sheetRef.slice(1, -1).replace(/''/g, "'");
+  }
+  if (bareName !== oldName) return rangeStr;
+  const needsQuote = quoted || /[^A-Za-z0-9_]/.test(newName);
+  const newSheetRef = needsQuote ? `'${newName.replace(/'/g, "''")}'` : newName;
+  return newSheetRef + rest;
+}
+
+// exceljs keeps the special built-in `_xlnm.Print_Area`/AutoFilter defined
+// names in sync with a renamed worksheet automatically (they're regenerated
+// live from the worksheet object), but a *custom* named range — one the
+// workbook's original author added, e.g. "DataRange" pointing at
+// `Data!$A$1:$B$2` — keeps the literal old sheet-name text verbatim even
+// after `worksheet.name = "Laser Marking"` above. Reloading a file with a
+// dangling reference like that is exactly what makes Excel's own repair
+// flow report "Removed Records: Named range from /xl/workbook.xml part
+// (Workbook)" on open. Rewrite every custom defined name's ranges so any
+// reference to a renamed sheet follows the rename instead of going stale.
+function fixDefinedNamesAfterRename(workbook: ExcelJS.Workbook, renameMap: Map<string, string>): void {
+  if (renameMap.size === 0) return;
+  const model = workbook.definedNames.model;
+  if (model.length === 0) return;
+  workbook.definedNames.model = model.map((dn) => ({
+    ...dn,
+    ranges: dn.ranges.map((r) => {
+      for (const [oldName, newName] of renameMap) {
+        const replaced = replaceSheetNameInRange(r, oldName, newName);
+        if (replaced !== r) return replaced;
+      }
+      return r;
+    }),
+  }));
+}
+
 // Reads every worksheet in a workbook into the plain string[][] grid the
 // client and the rest of this route work with — the single source of truth
 // for "workbook -> Sheet[]", used both to answer GET and to snapshot the
@@ -494,9 +542,11 @@ export async function POST(req: NextRequest, { params }: Params) {
     // Match/rename/create every sheet first (positionally), before touching
     // any cell — structural ops below need the right worksheet objects to
     // already exist, and value-writing needs the ops already applied.
+    const renamedSheets = new Map<string, string>();
     const worksheets = sheets.map((sheet, idx) => {
       let worksheet = outputWorkbook.worksheets[idx];
       if (worksheet) {
+        if (worksheet.name !== sheet.name) renamedSheets.set(worksheet.name, sheet.name);
         worksheet.name = sheet.name;
       } else {
         // New sheet (cloned client-side) — no original to copy formatting from.
@@ -504,6 +554,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
       return worksheet;
     });
+    fixDefinedNamesAfterRename(outputWorkbook, renamedSheets);
 
     // Physically shift existing rows/columns (styles and merges included)
     // out of the way for each insert, in the same order the user performed
