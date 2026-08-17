@@ -57,16 +57,26 @@ export default function ExcelEditorPage({ params }: { params: Promise<{ id: stri
     async function fetchSheets() {
       try {
         const res = await apiFetch(`/api/files/${id}/excel`);
-        const data = await res.json();
+        let data: { sheets?: unknown; error?: string };
+        try {
+          data = await res.json();
+        } catch {
+          // The response wasn't JSON at all — a timeout/gateway error page,
+          // a crash that bypassed the route's own try/catch, etc. Surface
+          // the HTTP status since that's the only signal available here;
+          // without this, every such failure collapsed into the same
+          // uninformative "Failed to load Excel file" regardless of cause.
+          throw new Error(`Server returned an unreadable response (HTTP ${res.status})`);
+        }
         if (cancelled) return;
         if (data.sheets) {
-          setSheets(data.sheets);
+          setSheets(data.sheets as Sheet[]);
           setSheetsVersion((v) => v + 1);
         } else {
-          setLoadError(data.error ?? "Failed to load sheets");
+          setLoadError(data.error ?? `Failed to load sheets (HTTP ${res.status})`);
         }
       } catch (err) {
-        if (!cancelled) setLoadError("Failed to load Excel file");
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : "Failed to load Excel file");
       }
     }
 
