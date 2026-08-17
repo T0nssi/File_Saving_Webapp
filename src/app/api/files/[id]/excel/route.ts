@@ -522,6 +522,20 @@ export async function POST(req: NextRequest, { params }: Params) {
       sheet.data.forEach((row, rowIdx) => {
         row.forEach((value, colIdx) => {
           const cell = worksheet.getCell(rowIdx + 1, colIdx + 1);
+          // A non-master cell inside a merged range doesn't hold its own
+          // value — reading it duplicates the master's text (see
+          // workbookToSheets/cellText), and setting it redirects the write
+          // to the master cell instead. Since every cell in the merge gets
+          // written here in order, that redirect meant whichever slave
+          // happened to be processed *last* silently overwrote whatever an
+          // earlier one (including a real edit) had just set — the merge's
+          // saved content was effectively random depending on its size and
+          // position, not what was actually typed. Skipping slave cells
+          // entirely and writing only the merge's one real value (at its
+          // master) makes this deterministic: edit the top-left cell of a
+          // merge to change it, edits elsewhere inside the same merge don't
+          // silently overwrite that.
+          if (cell.type === ExcelJS.ValueType.Merge) return;
           // Clear the value but keep the cell's style — matches how a
           // spreadsheet normally treats "delete contents" vs. "clear all".
           cell.value = value === "" ? null : value;

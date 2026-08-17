@@ -86,6 +86,11 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
   const activeResizeCleanup = useRef<(() => void) | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const tbodyRef = useRef<HTMLTableSectionElement>(null);
+  // Bumped only by undo (the one edit that changes cell content without any
+  // textarea firing its own input event) so the full-sheet resize effect
+  // below can react to it without re-running on every keystroke too — see
+  // that effect's comment for why running it that often was a real problem.
+  const [resizeTrigger, setResizeTrigger] = useState(0);
 
   const currentSheet = sheets[activeSheet] ?? { name: "", data: [] };
 
@@ -101,9 +106,14 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
     el.style.height = `${el.scrollHeight}px`;
   }
 
-  // Same resize, applied to every cell at once — covers the cases typing
-  // alone doesn't: initial load, switching sheets, undo, and restoring a
-  // revision, none of which fire a textarea's input event.
+  // Same resize, applied to every cell at once — covers the cases the
+  // per-cell input handler above can't: initial load, switching sheets, and
+  // undo, none of which fire a textarea's input event. Deliberately NOT
+  // keyed on the sheet data itself (which changes on every keystroke too) —
+  // that was measurably janky, since it means querying and re-measuring
+  // every textarea in the sheet (each read forces a layout recalculation)
+  // on every character typed, on top of the single-cell resize above
+  // already handling that same keystroke.
   useEffect(() => {
     const container = tbodyRef.current;
     if (!container) return;
@@ -111,7 +121,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
       el.style.height = "auto";
       el.style.height = `${el.scrollHeight}px`;
     });
-  }, [currentSheet.data]);
+  }, [activeSheet, resizeTrigger]);
 
   // `newOps` is only passed by insertRowAbove/insertColumnLeft, which are
   // the only edits that change the structural-op list; every other edit
@@ -312,6 +322,7 @@ export default function ExcelEditor({ fileId, filename, onSave, initialSheets, s
         setSheets(previousState.sheets);
         setStructuralOps(previousState.ops);
         setHistory(newHistory);
+        setResizeTrigger((v) => v + 1);
       }
     }
   };
